@@ -1,0 +1,150 @@
+.
+|____database
+| |____repository
+| | |____favorites_repository.py
+| | |____audit_repository.py
+| | |____guild_repository.py
+| | |______init__.py
+| | |____memory_repository.py
+| | |____ticket_repository.py
+| | |____user_repository.py
+| | |____mod_repository.py
+| | |____vc_repository.py
+| |______init__.py
+| |____ai
+| | |____background.txt
+| | |____moderation_rules.txt
+| | |______init__.py
+| | |____sqlite.py
+| | |____blocked_words.json
+| | |____memory.db
+| | |____keywords.json
+| |____prompts
+| | |____templates
+|____startup.py
+|____config.py
+|____PROJECT_STRUCTURE.md
+|____core
+| |____music
+| | |____queue.py
+| | |____service.py
+| | |______init__.py
+| | |____player.py
+| | |____embeds.py
+| | |____song.py
+| | |____views.py
+| |______init__.py
+| |____system
+| | |______init__.py
+| | |____startup_registry.py
+| | |____event_bus.py
+| | |____settings.py
+| | |____extension_loader.py
+| |____ai
+| | |____context_manager.py
+| | |____memory_manager.py
+| | |____models.py
+| | |____prompt_builder.py
+| | |____user_context.py
+| | |____search_manager.py
+| | |____budget.py
+| | |____tool_registry.py
+| | |______init__.py
+| | |____core.py
+| | |____agent_router.py
+| | |____admin_service.py
+| | |____file_parser
+| | | |____video_parser.py
+| | | |____binary_parser.py
+| | | |____encoding.py
+| | | |____summary_builder.py
+| | | |____models.py
+| | | |____registry.py
+| | | |____archive_parser.py
+| | | |____constants.py
+| | | |____metadata_builder.py
+| | | |______init__.py
+| | | |____audio_parser.py
+| | | |____image_parser.py
+| | | |____code_parser.py
+| | | |____text_parser.py
+| | | |____document_parser.py
+| | |____content_guard.py
+| | |____ranker.py
+| | |____json_utils.py
+| | |____abuse_guard.py
+| | |____gemini_client.py
+| |____minecraft
+| | |______init__.py
+| | |____pearl_calculator.py
+| |____logging
+| | |____traceback_utils.py
+| | |____log.py
+| | |____constants.py
+| | |______init__.py
+| | |____discord_error_handler.py
+|____settings.json
+|____requirements.txt
+|____pyproject.toml
+|____tests
+| |____test_json_utils.py
+| |____conftest.py
+| |____test_agent_router.py
+| |____test_tool_registry.py
+| |____test_content_guard.py
+| |____test_abuse_guard.py
+| |____test_budget.py
+| |____test_memory_manager.py
+|____utils
+| |____formatter.py
+| |____checks.py
+| |______init__.py
+| |____ai
+| | |______init__.py
+| | |____prompt_guard.py
+| |____converters.py
+| |____helpers.py
+|____README.md
+|____bot.py
+|____.gitignore
+|____output.txt
+|____cogs
+| |____music
+| | |____music.py
+| |____roles
+| | |____role_management.py
+| |____system
+| | |____monitor.py
+| | |____owner.py
+| | |____settings_cmd.py
+| | |____load.py
+| |____voice
+| | |____voice_channel.py
+| |____ai
+| | |____ai_owner_commands.py
+| | |____dashboard.py
+| | |____chat.py
+| | |____info.py
+| |____ticket
+| | |____ticket.py
+| |____events
+| | |______init__.py
+| | |____message.py
+| | |____status.py
+| |____minecraft
+| | |______init__.py
+| | |____mc_commands.py
+| |____utility
+| | |______init__.py
+| | |____favorites.py
+| | |____general.py
+| |____moderation
+| | |____mod.py
+| |____talk
+| | |____embed.py
+| | |____webhook.py
+| | |____say.py
+| | |______init__.py
+| | |____typing_indicator.py
+| |____guild
+| | |____guild_settings.py
