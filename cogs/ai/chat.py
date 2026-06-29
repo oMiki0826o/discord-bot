@@ -2,14 +2,15 @@
 cogs/ai/chat.py
 
 Modification():
-- 監聽 mention 訊息，整理 prompt、冷卻、鎖定與回覆送出。
-- 附件會分流為 file_parser 解析結果或 Gemini 圖片 Part。
-- generate() 呼叫改用明確關鍵字傳入 channel_id、files 與 image_parts。
-- 單一附件處理失敗只記錄 log，不中斷整體對話流程。
+- 使用每位使用者獨立 asyncio.Lock 取代全域 bool，避免並發請求競態。
+- 附件上限、冷卻秒數與使用者提示文案改由 settings.json 控制。
+- AI listener 會略過已被辨識為前綴指令的訊息，避免指令與 mention 對話互相干擾。
+- 附件仍分流為 file_parser 解析結果或 Gemini 圖片 Part，單一附件失敗不終止整體流程。
 
-職責：
-- 作為 Discord 訊息事件與 core.ai.generate() 之間的薄入口。
-- 不在 Cog 內組 Prompt 或直接呼叫 Gemini。
+Description():
+
+- 本檔是 Discord mention 訊息與 core.ai.generate() 之間的薄入口。
+- Prompt 組裝、模型路由、記憶與 Gemini 呼叫都留在 core.ai 層處理。
 """
 
 import asyncio
@@ -24,23 +25,15 @@ from discord.ext import commands
 from google.genai import types
 
 from core.ai.core import generate
-from core.system.settings import get as _s
 from core.ai.file_parser import parse as parse_file
-from core.ai.file_parser.models import ParsedFile
 from core.ai.file_parser.constants import IMAGE_EXTENSIONS, MAX_IMAGE_SIZE
+from core.ai.file_parser.models import ParsedFile
+from core.system.settings import get_float, get_int, get_str
 
 logger = logging.getLogger("bot.ai.chat")
 
-# ── 全域狀態 ──────────────────────
-# Bot 重啟後自動清空，不需要持久化
+# ── 圖片 MIME 對照 ──────────────────────
 
-user_locks:    dict[int, bool]  = {}
-user_cooldown: dict[int, float] = {}
-
-# 冷卻秒數 / 回覆長度上限：從 settings.json 動態讀取，免重啟即生效
-MAX_ATTACHMENTS  = 5       # 單則訊息最多處理的附件數量
-
-# 副檔名 → MIME type（image Part 需要，Discord content_type 有時為 None）
 _IMAGE_MIME: dict[str, str] = {
     ".png":  "image/png",
     ".jpg":  "image/jpeg",
@@ -55,6 +48,8 @@ class Chat(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self._user_locks: dict[int, asyncio.Lock] = {}
+        self._user_cooldown: dict[int, float] = {}
 
     # ── 清理 Mention ──────────────────────
 
@@ -63,12 +58,25 @@ class Chat(commands.Cog):
         從使用者訊息移除 bot 的 mention 標記，取得純文字 prompt。
         Discord mention 有兩種格式：<@ID> 與 <@!ID>（舊格式含驚嘆號）。
         """
+        if self.bot.user is None:
+            return content.strip()
+
         return (
             content
             .replace(f"<@{self.bot.user.id}>", "")
             .replace(f"<@!{self.bot.user.id}>", "")
             .strip()
         )
+
+    # ── 使用者狀態 ──────────────────────
+
+    def _lock_for(self, user_id: int) -> asyncio.Lock:
+        """取得使用者專屬鎖，避免同一使用者同時觸發多個 AI 請求。"""
+        lock = self._user_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._user_locks[user_id] = lock
+        return lock
 
     # ── Cooldown 檢查 ──────────────────────
 
@@ -78,12 +86,22 @@ class Chat(commands.Cog):
         同時更新最後請求時間戳。
         使用 monotonic clock，不受系統時鐘調整影響。
         """
-        now  = asyncio.get_running_loop().time()
-        last = user_cooldown.get(user_id, 0.0)
-        if now - last < float(_s('ai.cooldown_seconds', 3.0)):
+        cooldown_seconds = max(0.0, get_float("ai.cooldown_seconds", 3.0))
+        now = asyncio.get_running_loop().time()
+        last = self._user_cooldown.get(user_id, 0.0)
+        if now - last < cooldown_seconds:
             return False
-        user_cooldown[user_id] = now
+        self._user_cooldown[user_id] = now
         return True
+
+    def _cooldown_message(self) -> str:
+        """依設定檔產生冷卻提示。"""
+        seconds = max(0.0, get_float("ai.cooldown_seconds", 3.0))
+        template = get_str("ai.cooldown_message_template", "請稍等 {seconds:g} 秒再試")
+        try:
+            return template.format(seconds=seconds)
+        except (KeyError, ValueError):
+            return f"請稍等 {seconds:g} 秒再試"
 
     # ── 附件處理 ──────────────────────
 
@@ -97,8 +115,9 @@ class Chat(commands.Cog):
         """
         files:       list[ParsedFile] = []
         image_parts: list[types.Part] = []
+        max_attachments = max(0, get_int("ai.max_attachments", 5))
 
-        for attachment in attachments[:MAX_ATTACHMENTS]:
+        for attachment in attachments[:max_attachments]:
             ext = Path(attachment.filename).suffix.lower()
             try:
                 if ext in IMAGE_EXTENSIONS:
@@ -115,10 +134,10 @@ class Chat(commands.Cog):
                     attachment.filename, e,
                 )
 
-        if len(attachments) > MAX_ATTACHMENTS:
+        if len(attachments) > max_attachments:
             logger.info(
                 "[process_attachments] 附件數量 %d 超過上限 %d，僅處理前 %d 個",
-                len(attachments), MAX_ATTACHMENTS, MAX_ATTACHMENTS,
+                len(attachments), max_attachments, max_attachments,
             )
 
         return files, image_parts
@@ -167,14 +186,14 @@ class Chat(commands.Cog):
         """
         決策流程：
         1. text 為空 → edit 為（回覆為空），避免 error 50006
-        2. text ≤ int(_s('ai.max_reply_length', 1500)) → edit「思考中...」訊息
-        3. text > int(_s('ai.max_reply_length', 1500)) → 刪除「思考中...」，改傳 .txt 附件
+        2. text ≤ ai.max_reply_length → edit「思考中...」訊息
+        3. text > ai.max_reply_length → 刪除「思考中...」，改傳 .txt 附件
         """
         if not text or not text.strip():
-            await self._safe_edit(thinking, "（回覆為空）")
+            await self._safe_edit(thinking, get_str("ai.empty_reply_message", "（回覆為空）"))
             return
 
-        if len(text) <= int(_s('ai.max_reply_length', 1500)):
+        if len(text) <= max(1, get_int("ai.max_reply_length", 1500)):
             await self._safe_edit(thinking, text)
             return
 
@@ -186,7 +205,7 @@ class Chat(commands.Cog):
 
         buf  = io.BytesIO(text.encode("utf-8"))
         file = discord.File(buf, filename="response.txt")
-        await original.reply(content="回覆內容較長，請見附件", file=file)
+        await original.reply(content=get_str("ai.long_reply_notice", "回覆內容較長，請見附件"), file=file)
 
     async def _safe_edit(
         self,
@@ -220,43 +239,51 @@ class Chat(commands.Cog):
         5. 根據長度決定更新方式
         """
         user_id = message.author.id
+        lock = self._lock_for(user_id)
+
+        # ── 鎖定檢查（防止並發請求） ──────────────────────
+        if lock.locked():
+            await message.reply(get_str("ai.busy_message", "正在處理上一個請求，請稍後"))
+            return
 
         # ── 冷卻檢查 ──────────────────────
         if not self.check_cooldown(user_id):
-            await message.reply(f"請稍等 {float(_s('ai.cooldown_seconds', 3.0))} 秒再試")
+            await message.reply(self._cooldown_message())
             return
 
-        # ── 鎖定檢查（防止並發請求） ──────────────────────
-        if user_locks.get(user_id):
-            await message.reply("正在處理上一個請求，請稍後")
-            return
+        async with lock:
+            # ── 附件解析（鎖定後才處理，避免並發請求重複下載） ──────────────────────
+            files, image_parts = await self.process_attachments(message.attachments)
 
-        user_locks[user_id] = True
+            thinking = await message.reply(get_str("ai.thinking_message", "思考中..."))
 
-        # ── 附件解析（鎖定後才處理，避免並發請求重複下載） ──────────────────────
-        files, image_parts = await self.process_attachments(message.attachments)
+            try:
+                text = await generate(
+                    user=message.author,
+                    prompt=prompt,
+                    channel_id=str(message.channel.id),
+                    files=files,
+                    image_parts=image_parts,
+                )
+                await self.send_response(thinking, text, original=message)
 
-        thinking = await message.reply("思考中...")
+            except Exception as e:
+                logger.exception(
+                    "[handle_ai] error user=%s: %s", user_id, e,
+                )
+                template = get_str("ai.error_message_template", "錯誤：{error}")
+                try:
+                    error_message = template.format(error=type(e).__name__)
+                except (KeyError, ValueError):
+                    error_message = f"錯誤：{type(e).__name__}"
+                await self._safe_edit(thinking, error_message)
 
-        try:
-            text = await generate(
-                user=message.author,
-                prompt=prompt,
-                channel_id=str(message.channel.id),
-                files=files,
-                image_parts=image_parts,
-            )
-            await self.send_response(thinking, text, original=message)
+    # ── 指令訊息判斷 ──────────────────────
 
-        except Exception as e:
-            logger.exception(
-                "[handle_ai] error user=%s: %s", user_id, e,
-            )
-            await self._safe_edit(thinking, f"錯誤：{type(e).__name__}")
-
-        finally:
-            # 無論成功或失敗都要解鎖，否則使用者永久無法再發請求
-            user_locks[user_id] = False
+    async def _is_command_message(self, message: discord.Message) -> bool:
+        """避免 AI listener 處理已被 commands.Bot 辨識為前綴指令的訊息。"""
+        context = await self.bot.get_context(message)
+        return context.valid
 
     # ── 事件入口 ──────────────────────
 
@@ -265,17 +292,21 @@ class Chat(commands.Cog):
         """只在被 mention 時才回應，忽略 bot 自己的訊息。"""
         if message.author.bot:
             return
-        if self.bot.user not in message.mentions:
+        if await self._is_command_message(message):
+            return
+
+        bot_user = self.bot.user
+        if bot_user is None or bot_user not in message.mentions:
             return
 
         prompt = self.parse_prompt(message.content)
         if not prompt and not message.attachments:
-            await message.reply("請輸入想問的內容")
+            await message.reply(get_str("ai.empty_prompt_message", "請輸入想問的內容"))
             return
 
-        # 只夾帶附件、沒有文字時，給一個預設提示讓 AI 知道要看附件
+        # ── 預設附件提示 ──────────────────────
         if not prompt:
-            prompt = "請看一下這個附件並告訴我內容。"
+            prompt = get_str("ai.default_attachment_prompt", "請看一下這個附件並告訴我內容。")
 
         await self.handle_ai(message, prompt)
 

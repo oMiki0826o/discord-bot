@@ -2,12 +2,14 @@
 core/system/event_bus.py
 
 Modification():
-- 統一檔案註解格式，保留原有職責說明。
+- on() 會略過同一事件的同一 handler，避免重複 import 或熱重載造成背景任務重複執行。
+- Handler 仍以 create_task 方式執行，不阻塞發佈者。
+- 背景 task 會被集合追蹤，完成後自動移除，避免執行中被回收。
 
-職責：
-- 輕量 pub/sub 事件系統，取代 core.py 中散落的 asyncio.create_task()
-- Handler 以 create_task 方式執行，不阻塞發佈者
-- 各模組在 import 時自行呼叫 on() 注冊 handler
+Description():
+
+- 本檔提供輕量 pub/sub 事件系統，取代 core.py 中散落的 asyncio.create_task()。
+- 各模組在 import 時自行註冊 handler，發佈者只需呼叫 emit()。
 
 設計說明：
 - 全域 _handlers dict，無需實例化
@@ -44,7 +46,11 @@ def on(event: str, handler: Callable[..., Coroutine]) -> None:
     Example:
         event_bus.on("message_generated", my_async_handler)
     """
-    _handlers[event].append(handler)
+    handlers = _handlers[event]
+    if handler in handlers:
+        logger.debug("[event_bus] duplicate handler ignored event=%s handler=%s", event, handler.__name__)
+        return
+    handlers.append(handler)
 
 
 async def emit(event: str, **kwargs: Any) -> None:

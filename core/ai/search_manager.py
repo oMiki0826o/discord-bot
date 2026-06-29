@@ -2,11 +2,14 @@
 core/ai/search_manager.py
 
 Modification():
-- 統一檔案註解格式，保留原有職責說明。
+- TTL 與模糊命中閾值改為使用時讀取 settings.json，符合熱更新語意。
+- 設定值加入範圍保護，避免 0、負數或超過 1 的 fuzzy threshold 造成異常行為。
+- 保留精確命中優先、模糊命中其次的搜尋快取策略。
 
-職責：
-- 搜尋快取：命中時跳過 Grounding，節省 Token
-- 統一入口：check_cache() 回傳 (快取結果, 是否仍需搜尋)
+Description():
+
+- 本檔管理 Grounding 搜尋結果快取，命中時可跳過外部搜尋以節省 Token。
+- check_cache() 回傳 (快取結果, 是否仍需搜尋)，save_result() 負責回填快取。
 
 合併來源：
 - core/ai/search_cache.py
@@ -23,8 +26,7 @@ Modification():
   agent_router 加入對應路由規則後再啟用
 
 新增（行為調校集中化）：
-- _SHORT_TTL_MIN / _LONG_TTL_MIN / _FUZZY_THR 改由 config.py
-  統一提供，可透過環境變數調整（預設值與優化前相同）
+- 短期 TTL、長期 TTL 與模糊比對閾值由 settings.json 統一提供，可熱更新。
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ import logging
 import time
 from difflib import SequenceMatcher
 
-from core.system.settings import get as _s
+from core.system.settings import get_float, get_int
 from database.ai.sqlite import get_connection
 
 logger = logging.getLogger("bot.search_manager")
@@ -45,9 +47,6 @@ _SHORT_TTL_KEYWORDS = (
     "天氣", "股價", "匯率", "即時", "最新", "現在", "今天",
     "weather", "stock", "price", "latest", "current",
 )
-_SHORT_TTL_MIN  = int(_s('ai.search_short_ttl_min', 30))
-_LONG_TTL_MIN   = int(_s('ai.search_long_ttl_min', 1440))
-_FUZZY_THR      = float(_s('ai.search_fuzzy_threshold', 0.85))
 
 # ── DB 初始化 ──────────────────────
 
@@ -77,9 +76,24 @@ def _hash(query: str) -> str:
     return hashlib.md5(query.lower().strip().encode()).hexdigest()
 
 
+def _short_ttl_min() -> int:
+    """取得時效性查詢快取分鐘數。"""
+    return max(1, get_int("ai.search_short_ttl_min", 30))
+
+
+def _long_ttl_min() -> int:
+    """取得一般查詢快取分鐘數。"""
+    return max(1, get_int("ai.search_long_ttl_min", 1440))
+
+
+def _fuzzy_threshold() -> float:
+    """取得模糊命中門檻，限制在 0.0 到 1.0。"""
+    return min(1.0, max(0.0, get_float("ai.search_fuzzy_threshold", 0.85)))
+
+
 def _ttl(query: str) -> int:
     q = query.lower()
-    return _SHORT_TTL_MIN if any(k in q for k in _SHORT_TTL_KEYWORDS) else _LONG_TTL_MIN
+    return _short_ttl_min() if any(k in q for k in _SHORT_TTL_KEYWORDS) else _long_ttl_min()
 
 # ── 快取 ──────────────────────
 
@@ -111,9 +125,10 @@ def check_cache(query: str) -> tuple[str | None, bool]:
     rows    = c.fetchall()
     conn.close()
     q_lower = query.lower()
+    fuzzy_threshold = _fuzzy_threshold()
     for r in rows:
         ratio = SequenceMatcher(None, q_lower, r["query_text"].lower()).ratio()
-        if ratio >= _FUZZY_THR:
+        if ratio >= fuzzy_threshold:
             logger.debug(
                 "[search_manager] cache fuzzy ratio=%.2f: %r", ratio, query[:50],
             )

@@ -35,9 +35,30 @@
       "task": "任務模式",
       "debate": "辯論模式"
     },
+    "max_attachments": 5,
+    "default_attachment_prompt": "請看一下這個附件並告訴我內容。",
+    "empty_prompt_message": "請輸入想問的內容",
+    "busy_message": "正在處理上一個請求，請稍後",
+    "cooldown_message_template": "請稍等 {seconds:g} 秒再試",
+    "thinking_message": "思考中...",
+    "long_reply_notice": "回覆內容較長，請見附件",
+    "empty_reply_message": "（回覆為空）",
+    "error_message_template": "錯誤：{error}",
     "summary_trigger": 40,
     "summary_keep": 10,
+    "summary_min_messages": 10,
+    "summary_line_max_chars": 200,
     "memory_cache_ttl": 5.0,
+    "memory_extract_timeout_seconds": 15,
+    "memory_embed_timeout_seconds": 10,
+    "memory_summary_timeout_seconds": 20,
+    "memory_min_extract_chars": 20,
+    "memory_embedding_max_chars": 2000,
+    "memory_candidate_limit": 30,
+    "message_candidate_limit": 200,
+    "recent_message_limit": 12,
+    "vector_candidate_limit": 5,
+    "memory_vectorize_delay_seconds": 1.0,
     "abuse_window_seconds": 60,
     "abuse_max_requests": 15,
     "abuse_restrict_minutes": 10,
@@ -45,7 +66,8 @@
     "search_long_ttl_min": 1440,
     "search_fuzzy_threshold": 0.85,
     "alert_error_rate_threshold": 0.15,
-    "alert_check_interval_seconds": 300
+    "alert_check_interval_seconds": 300,
+    "alert_min_sample_size": 5
   },
   "music": {
     "_comment": "音樂播放系統設定",
@@ -96,5 +118,10 @@
     "_comment": "全局 Embed 頁腳文字",
     "default": "Firefly Bot",
     "music": "音樂系統"
+  },
+  "dm": {
+    "_comment": "私訊轉發與 Owner 回覆橋接設定",
+    "forward_map_limit": 200,
+    "owner_reply_prefix": "**Bot 回覆：**\n"
   }
 }

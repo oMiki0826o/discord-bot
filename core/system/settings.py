@@ -1,20 +1,17 @@
 """
 core/system/settings.py
 
-職責：
-- 載入並快取 settings.json（專案根目錄）
-- 基於 mtime 的熱重載：每次存取時用一次 os.stat() 判斷是否需重讀
-  （成本極低，檔案不變動時等同記憶體存取）
-- 提供型別安全的便捷存取函式：get() 支援點號路徑（如 "ai.cooldown_seconds"）
-- 機密設定（TOKEN / API Key）不在此，仍由 .env + config.py 管理
-
 Modification():
 
-- 全新建立，作為 firefly-bot 統一設定系統的核心
-- 設計參考 core/ai/content_guard.py 的 mtime 快取模式
-- 所有模組統一從此讀設定，不再各自散落 hardcode 預設值
-- reload() 供管理員指令（$settings reload）強制刷新
+- 保留基於 mtime 的 settings.json 熱重載快取。
+- 新增 get_int()、get_float()、get_bool()、get_str()，集中處理設定轉型與 fallback。
+- 補齊 AI 訊息、附件上限與 DM 橋接相關預設值，減少 Cog 內硬編碼。
+- reload() 仍提供管理員指令強制刷新設定。
 
+Description():
+
+- 本檔是非機密設定的唯一入口，支援點號路徑讀取 settings.json。
+- TOKEN、API Key 等機密仍由 .env 與 config.py 管理，不放進 settings.json。
 """
 
 from __future__ import annotations
@@ -49,7 +46,16 @@ _DEFAULTS: dict[str, Any] = {
     "ai.default_model":        "gemma",
     "ai.cooldown_seconds":     3.0,
     "ai.max_reply_length":     1500,
+    "ai.max_attachments":      5,
     "ai.persona_name":         "流螢",
+    "ai.default_attachment_prompt": "請看一下這個附件並告訴我內容。",
+    "ai.empty_prompt_message": "請輸入想問的內容",
+    "ai.busy_message":         "正在處理上一個請求，請稍後",
+    "ai.cooldown_message_template": "請稍等 {seconds:g} 秒再試",
+    "ai.thinking_message":     "思考中...",
+    "ai.long_reply_notice":    "回覆內容較長，請見附件",
+    "ai.empty_reply_message":  "（回覆為空）",
+    "ai.error_message_template": "錯誤：{error}",
     "ai.social_tier_names":    {"0":"陌生人","1":"路人","2":"朋友","3":"開拓者"},
     "ai.conversation_state_labels": {
         "normal":"一般對話","roleplay":"角色扮演",
@@ -57,7 +63,19 @@ _DEFAULTS: dict[str, Any] = {
     },
     "ai.summary_trigger":      40,
     "ai.summary_keep":         10,
+    "ai.summary_min_messages": 10,
+    "ai.summary_line_max_chars": 200,
     "ai.memory_cache_ttl":     5.0,
+    "ai.memory_extract_timeout_seconds": 15,
+    "ai.memory_embed_timeout_seconds": 10,
+    "ai.memory_summary_timeout_seconds": 20,
+    "ai.memory_min_extract_chars": 20,
+    "ai.memory_embedding_max_chars": 2000,
+    "ai.memory_candidate_limit": 30,
+    "ai.message_candidate_limit": 200,
+    "ai.recent_message_limit": 12,
+    "ai.vector_candidate_limit": 5,
+    "ai.memory_vectorize_delay_seconds": 1.0,
     "ai.abuse_window_seconds": 60,
     "ai.abuse_max_requests":   15,
     "ai.abuse_restrict_minutes": 10,
@@ -66,6 +84,7 @@ _DEFAULTS: dict[str, Any] = {
     "ai.search_fuzzy_threshold": 0.85,
     "ai.alert_error_rate_threshold": 0.15,
     "ai.alert_check_interval_seconds": 300,
+    "ai.alert_min_sample_size": 5,
 
     "music.max_queue_size":        200,
     "music.idle_timeout_seconds":  180,
@@ -91,6 +110,9 @@ _DEFAULTS: dict[str, Any] = {
 
     "embed_footer.default": "Firefly Bot",
     "embed_footer.music":   "音樂系統",
+
+    "dm.forward_map_limit": 200,
+    "dm.owner_reply_prefix": "**Bot 回覆：**\n",
 }
 
 
@@ -118,7 +140,7 @@ def _reload_if_changed() -> dict[str, Any]:
 
     try:
         raw = json.loads(_SETTINGS.read_text(encoding="utf-8"))
-        # 過濾 _comment 鍵
+        # ── 過濾註解鍵 ──────────────────────
         _cache       = {k: v for k, v in raw.items() if not k.startswith("_")}
         _cache_mtime = mtime
         logger.info("[settings] settings.json 已重新載入")
@@ -166,11 +188,60 @@ def get(path: str, default: Any = None) -> Any:
     except (KeyError, TypeError):
         pass
 
-    # 回退到 _DEFAULTS
+    # ── 預設值回退 ──────────────────────
     if path in _DEFAULTS:
         return _DEFAULTS[path]
 
     return default
+
+
+def get_int(path: str, default: int = 0) -> int:
+    """取得整數設定；值不存在或無法轉型時回傳 default。"""
+    value = get(path, default)
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning("[settings] %s=%r 無法轉為 int，使用預設 %r", path, value, default)
+        return default
+
+
+def get_float(path: str, default: float = 0.0) -> float:
+    """取得浮點數設定；值不存在或無法轉型時回傳 default。"""
+    value = get(path, default)
+    if isinstance(value, bool):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        logger.warning("[settings] %s=%r 無法轉為 float，使用預設 %r", path, value, default)
+        return default
+
+
+def get_bool(path: str, default: bool = False) -> bool:
+    """取得布林設定；支援常見字串表示法。"""
+    value = get(path, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    if isinstance(value, int):
+        return bool(value)
+    logger.warning("[settings] %s=%r 無法轉為 bool，使用預設 %r", path, value, default)
+    return default
+
+
+def get_str(path: str, default: str = "") -> str:
+    """取得字串設定；None 會回退 default，其餘型別以 str() 轉換。"""
+    value = get(path, default)
+    if value is None:
+        return default
+    return str(value)
 
 
 def get_section(section: str) -> dict[str, Any]:
@@ -233,6 +304,6 @@ def write_value(path: str, value) -> None:
     except Exception as e:
         raise RuntimeError(f"寫入 settings.json 失敗：{e}") from e
 
-    # 使快取失效，下次 get() 重新載入
+    # ── 快取失效 ──────────────────────
     _cache_mtime = -1.0
     logger.info("[settings] write_value: %s = %r", path, value)

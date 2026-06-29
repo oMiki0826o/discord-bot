@@ -2,12 +2,14 @@
 core/ai/memory_manager.py
 
 Modification():
-- 統一檔案註解格式，保留原有職責說明。
+- 記憶快取、摘要門檻、候選數量與逾時秒數改為使用時讀取 settings.json。
+- 移除 import 時固定的設定常數，讓熱更新設定能真正影響記憶流程。
+- 背景任務仍由 event_bus 觸發，保持 core.py 與記憶副作用解耦。
 
-職責：
-- 統一管理所有記憶操作：訊息、長期記憶、向量記憶、摘要
-- 提供 search() 供 context_manager 一次取得所有記憶來源
-- 背景任務（擷取、摘要、向量化）由 event_bus 觸發
+Description():
+
+- 本檔統一管理訊息、長期記憶、向量記憶與摘要。
+- search() 供 context_manager 一次取得所有記憶來源，背景擷取與摘要由事件觸發。
 
 合併來源：
 - core/ai/memory.py
@@ -43,8 +45,7 @@ Modification():
   頻道發送相同內容時，誤用對方頻道的快取結果
 
 新增（行為調校集中化）：
-- _SUMMARY_TRIGGER / _SUMMARY_KEEP / _CACHE_TTL 改由 settings.json
-  統一提供，可熱更新（預設值與優化前相同）
+- 摘要、快取、候選數量與模型逾時均由 settings.json 統一提供，可熱更新。
 """
 
 from __future__ import annotations
@@ -57,12 +58,12 @@ import time
 
 from google.genai import types
 
-from core.system.settings import get as _s
 import database.repository.memory_repository as repo
 from core.ai.gemini_client import client
 from core.ai.json_utils import strip_json_fence
 from core.ai.models import EMBED_MODEL, MODELS
 from core.system import event_bus
+from core.system.settings import get_float, get_int
 
 logger = logging.getLogger("bot.memory_manager")
 
@@ -71,11 +72,6 @@ logger = logging.getLogger("bot.memory_manager")
 _EXTRACT_MODEL   = MODELS["lite"]
 _EMBED_MODEL     = EMBED_MODEL
 _SUMMARY_MODEL   = MODELS["lite"]
-_EXTRACT_TIMEOUT = 15
-_EMBED_TIMEOUT   = 10
-_SUMMARY_TIMEOUT = 20
-_SUMMARY_TRIGGER = int(_s('ai.summary_trigger', 40))   # 訊息數超過此值才觸發摘要
-_SUMMARY_KEEP    = int(_s('ai.summary_keep', 10))      # 摘要時保留最新 N 筆不納入
 
 _EXTRACT_SYSTEM = (
     "你是長期記憶分析器。只輸出 JSON，沒有值得記憶的就輸出 {\"memories\":[]}。\n"
@@ -92,7 +88,67 @@ _SUMMARY_SYSTEM = (
 # ── 簡易記憶快取（TTL 由 settings.json 統一管理） ──────────────────────
 
 _search_cache: dict[str, tuple[float, MemoryBundle]] = {}
-_CACHE_TTL = float(_s('ai.memory_cache_ttl', 5.0))
+
+# ── 設定讀取 ──────────────────────
+
+def _summary_trigger() -> int:
+    return max(1, get_int("ai.summary_trigger", 40))
+
+
+def _summary_keep() -> int:
+    return max(0, get_int("ai.summary_keep", 10))
+
+
+def _summary_min_messages() -> int:
+    return max(1, get_int("ai.summary_min_messages", 10))
+
+
+def _summary_line_max_chars() -> int:
+    return max(1, get_int("ai.summary_line_max_chars", 200))
+
+
+def _cache_ttl() -> float:
+    return max(0.0, get_float("ai.memory_cache_ttl", 5.0))
+
+
+def _extract_timeout() -> float:
+    return max(1.0, get_float("ai.memory_extract_timeout_seconds", 15.0))
+
+
+def _embed_timeout() -> float:
+    return max(1.0, get_float("ai.memory_embed_timeout_seconds", 10.0))
+
+
+def _summary_timeout() -> float:
+    return max(1.0, get_float("ai.memory_summary_timeout_seconds", 20.0))
+
+
+def _min_extract_chars() -> int:
+    return max(0, get_int("ai.memory_min_extract_chars", 20))
+
+
+def _embedding_max_chars() -> int:
+    return max(1, get_int("ai.memory_embedding_max_chars", 2000))
+
+
+def _memory_candidate_limit() -> int:
+    return max(1, get_int("ai.memory_candidate_limit", 30))
+
+
+def _message_candidate_limit() -> int:
+    return max(1, get_int("ai.message_candidate_limit", 200))
+
+
+def _recent_message_limit() -> int:
+    return max(1, get_int("ai.recent_message_limit", 12))
+
+
+def _vector_candidate_limit() -> int:
+    return max(1, get_int("ai.vector_candidate_limit", 5))
+
+
+def _vectorize_delay_seconds() -> float:
+    return max(0.0, get_float("ai.memory_vectorize_delay_seconds", 1.0))
 
 # ── 儲存入口 ──────────────────────
 
@@ -135,7 +191,7 @@ def search(
 ) -> MemoryBundle:
     """
     一次取得所有記憶來源並排序。
-    結果快取 _CACHE_TTL 秒，同一請求內重複呼叫不會重複查詢。
+    結果快取 ai.memory_cache_ttl 秒，同一請求內重複呼叫不會重複查詢。
 
     channel_id 用於過濾「相關歷史訊息」與「最近對話」（messages / recent），
     確保不同伺服器 / 頻道的對話不會互相混入；
@@ -145,16 +201,16 @@ def search(
     now = time.monotonic()
     if cache_key in _search_cache:
         ts, bundle = _search_cache[cache_key]
-        if now - ts < _CACHE_TTL:
+        if now - ts < _cache_ttl():
             return bundle
 
     background   = repo.load_background()
     global_mems  = global_mems or []
-    raw_mems     = repo.get_memories_candidate(user_id, limit=30)
+    raw_mems     = repo.get_memories_candidate(user_id, limit=_memory_candidate_limit())
     all_memories = global_mems + background + raw_mems
 
-    raw_msgs     = repo.get_messages_candidate(user_id, channel_id, limit=200)
-    recent       = repo.get_recent_messages(user_id, channel_id, limit=12)
+    raw_msgs     = repo.get_messages_candidate(user_id, channel_id, limit=_message_candidate_limit())
+    recent       = repo.get_recent_messages(user_id, channel_id, limit=_recent_message_limit())
     summary      = repo.get_summary(user_id)
 
     from core.ai.ranker import optimize_context
@@ -221,7 +277,7 @@ async def _on_message_generated(
 
 
 async def _extract(user_id: str, user_input: str, ai_output: str) -> None:
-    if len(user_input) + len(ai_output) < 20:
+    if len(user_input) + len(ai_output) < _min_extract_chars():
         return
     try:
         res = await asyncio.wait_for(
@@ -232,7 +288,7 @@ async def _extract(user_id: str, user_input: str, ai_output: str) -> None:
                     system_instruction=_EXTRACT_SYSTEM,
                 ),
             ),
-            timeout=_EXTRACT_TIMEOUT,
+            timeout=_extract_timeout(),
         )
         raw     = (res.text or "").strip()
         cleaned = strip_json_fence(raw)
@@ -264,13 +320,14 @@ async def _extract(user_id: str, user_input: str, ai_output: str) -> None:
 
 async def _summarize_if_needed(user_id: str) -> None:
     count = repo.count_messages(user_id)
-    if count < _SUMMARY_TRIGGER:
+    if count < _summary_trigger():
         return
-    messages = repo.get_messages_excluding_recent(user_id, _SUMMARY_KEEP)
-    if len(messages) < 10:
+    messages = repo.get_messages_excluding_recent(user_id, _summary_keep())
+    if len(messages) < _summary_min_messages():
         return
+    line_max_chars = _summary_line_max_chars()
     conversation = "\n".join(
-        f"{role}: {content[:200]}" for role, content in messages
+        f"{role}: {content[:line_max_chars]}" for role, content in messages
     )
     try:
         res = await asyncio.wait_for(
@@ -281,7 +338,7 @@ async def _summarize_if_needed(user_id: str) -> None:
                     system_instruction=_SUMMARY_SYSTEM,
                 ),
             ),
-            timeout=_SUMMARY_TIMEOUT,
+            timeout=_summary_timeout(),
         )
         summary = (res.text or "").strip()
         if summary:
@@ -297,9 +354,9 @@ async def _summarize_if_needed(user_id: str) -> None:
 
 
 async def _vectorize_recent(user_id: str, query: str) -> None:
-    """向量化最近擷取到的記憶（延遲 1 秒等待 extract 完成）。"""
-    await asyncio.sleep(1)
-    mems = repo.get_memories_candidate(user_id, limit=5)
+    """向量化最近擷取到的記憶；延遲秒數由 settings.json 控制。"""
+    await asyncio.sleep(_vectorize_delay_seconds())
+    mems = repo.get_memories_candidate(user_id, limit=_vector_candidate_limit())
     for kw, content, imp in mems:
         vec = await _embed(f"{kw}: {content}")
         if vec:
@@ -308,11 +365,12 @@ async def _vectorize_recent(user_id: str, query: str) -> None:
 
 async def force_summarize(user_id: str) -> str:
     """強制生成摘要（供管理指令使用）。"""
-    messages = repo.get_messages_excluding_recent(user_id, _SUMMARY_KEEP)
+    messages = repo.get_messages_excluding_recent(user_id, _summary_keep())
     if not messages:
         return ""
+    line_max_chars = _summary_line_max_chars()
     conversation = "\n".join(
-        f"{role}: {content[:200]}" for role, content in messages
+        f"{role}: {content[:line_max_chars]}" for role, content in messages
     )
     try:
         res = await asyncio.wait_for(
@@ -323,7 +381,7 @@ async def force_summarize(user_id: str) -> str:
                     system_instruction=_SUMMARY_SYSTEM,
                 ),
             ),
-            timeout=_SUMMARY_TIMEOUT,
+            timeout=_summary_timeout(),
         )
         summary = (res.text or "").strip()
         if summary:
@@ -349,9 +407,9 @@ async def _embed(text: str) -> list[float] | None:
         res = await asyncio.wait_for(
             client.aio.models.embed_content(
                 model    = _EMBED_MODEL,
-                contents = text[:2_000],
+                contents = text[:_embedding_max_chars()],
             ),
-            timeout=_EMBED_TIMEOUT,
+            timeout=_embed_timeout(),
         )
         embeddings = getattr(res, "embeddings", None)
         if embeddings and embeddings[0].values:

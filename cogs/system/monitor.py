@@ -2,10 +2,14 @@
 cogs/system/monitor.py
 
 Modification():
-- 統一檔案註解格式，保留原有職責說明。
 
-職責：
-- 週期性背景任務：定期檢查過去 1 小時的錯誤率，超過閾值時主動通知 Owner
+- 使用 get_int() / get_float() 讀取監控間隔、錯誤率閾值與最小樣本數。
+- 最小樣本數改由 settings.json 控制，避免程式內固定常數。
+- 保留 ready_event 等待與重複告警抑制。
+
+Description():
+
+- 本檔提供週期性背景任務，檢查過去 1 小時錯誤率並透過 ERROR log 通知 Owner。
 
 設計說明：
 - 直接沿用 core.logging.discord_error_handler 既有的「攔截 ERROR 等級
@@ -28,12 +32,10 @@ import logging
 
 from discord.ext import commands, tasks
 
-from core.system.settings import get as _s
 from core.ai.budget import get_global_stats
+from core.system.settings import get_float, get_int
 
 logger = logging.getLogger("bot.system.monitor")
-
-_MIN_SAMPLE_SIZE = 5   # 請求數低於此值時不計算錯誤率告警，避免樣本太少誤判
 
 
 class Monitor(commands.Cog):
@@ -43,8 +45,9 @@ class Monitor(commands.Cog):
         self.bot = bot
         self._alert_active = False   # 目前是否已處於「已通知」狀態，避免重複告警
 
-        # 啟動前依 config 設定實際檢查間隔（預設 300 秒，由 config 覆寫）
-        self.check_loop.change_interval(seconds=int(_s('ai.alert_check_interval_seconds', 300)))
+        # ── 啟動檢查間隔 ──────────────────────
+        interval = max(1, get_int("ai.alert_check_interval_seconds", 300))
+        self.check_loop.change_interval(seconds=interval)
         self.check_loop.start()
 
     async def cog_unload(self) -> None:
@@ -52,11 +55,11 @@ class Monitor(commands.Cog):
 
     @tasks.loop(seconds=300)
     async def check_loop(self) -> None:
-        # getattr 而非 self.bot.ready_event：ready_event 是專案自訂的
-        # DiscordBot（定義於 bot.py）才有的屬性，標準 commands.Bot 型別
-        # 沒有此屬性。維持 bot 參數標註為通用的 commands.Bot
-        # （與其他 cog 的 setup() 慣例一致），這裡用 getattr 安全存取，
-        # 若不存在則直接跳過本次檢查，而不是讓型別系統假裝它一定存在。
+        """
+        ready_event 是 FireflyBot 自訂屬性；若測試或替身 bot 沒有此屬性，
+        本輪檢查直接跳過等待，避免背景任務在初始化前誤跑。
+        """
+        # ── 等待初始化完成 ──────────────────────
         ready_event = getattr(self.bot, "ready_event", None)
         if ready_event is not None:
             await ready_event.wait()
@@ -68,11 +71,12 @@ class Monitor(commands.Cog):
             return
 
         total_events = stats["total_requests"] + stats["error_count"]
-        if total_events < _MIN_SAMPLE_SIZE:
+        min_sample_size = max(1, get_int("ai.alert_min_sample_size", 5))
+        if total_events < min_sample_size:
             return   # 樣本太少，跳過本次檢查
 
         error_rate = stats["error_rate"]
-        threshold  = float(_s('ai.alert_error_rate_threshold', 0.15))
+        threshold  = max(0.0, get_float("ai.alert_error_rate_threshold", 0.15))
 
         if error_rate >= threshold:
             if not self._alert_active:

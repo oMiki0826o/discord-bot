@@ -3,14 +3,15 @@ bot/bot.py
 
 Modification():
 
-- setup_hook 新增 attach_bot()，確保 DiscordErrorHandler 正確掛載
-- setup_hook 新增 sync_slash()，啟動時自動同步 Slash Commands 並輸出數量
-- setup_hook 新增 ready_event，供 Cog 內背景任務等待初始化完成
-- on_ready 新增啟動摘要（伺服器數、使用者數、啟動耗時）
-- close() 新增優雅關閉：輸出「Bot 關閉中...」、送出關機報告
-- __main__ 攔截 KeyboardInterrupt，改為輸出「Bot 關閉中...」取代 traceback
-- 移除 help_command=None 硬編碼，改由 settings.json 控制前綴
+- 將前綴改為動態讀取 settings.json，避免改設定後仍需重啟。
+- 保留 setup_hook 的初始化、Cog 載入、Slash 同步與 ready_event 通知流程。
+- close() 維持優雅關閉，關機報告逾時或失敗時不阻塞 Discord 連線關閉。
+- KeyboardInterrupt 僅輸出簡短關閉訊息，避免終端出現不必要 traceback。
 
+Description():
+
+- FireflyBot 是專案的 Discord Bot 入口，負責建立 intents、載入擴充模組、
+  同步 Slash Commands、套用 presence，並管理啟動與關閉生命週期。
 """
 
 from __future__ import annotations
@@ -51,7 +52,15 @@ _STATUS_MAP: dict[str, discord.Status] = {
 }
 
 
-# ── 從 settings.json 組合 presence ──────────────────────
+# ── 指令前綴 ──────────────────────
+
+def _dynamic_command_prefix(bot: commands.Bot, message: discord.Message) -> list[str]:
+    """每次解析指令時讀取 settings.json，讓前綴設定可以熱更新。"""
+    prefix = str(get("bot.command_prefix", "$")).strip() or "$"
+    return commands.when_mentioned_or(prefix)(bot, message)
+
+
+# ── Presence 組合 ──────────────────────
 
 def _build_presence() -> tuple[discord.Activity | None, discord.Status]:
     atype_str = get("bot.status_type", "listening")
@@ -84,9 +93,10 @@ class FireflyBot(commands.Bot):
         intents.guilds          = True
 
         super().__init__(
-            command_prefix = get("bot.command_prefix", "$"),
-            intents        = intents,
-            owner_id       = config.OWNER_ID or None,
+            command_prefix     = _dynamic_command_prefix,
+            intents            = intents,
+            owner_id           = config.OWNER_ID or None,
+            strip_after_prefix = True,
         )
 
         self.log_manager                 = log_manager
@@ -108,8 +118,7 @@ class FireflyBot(commands.Bot):
         if failed:
             logger.warning("預熱失敗模組: %s", [r.module for r in failed])
 
-        # ── 掛載 Discord 錯誤通報 handler（必須在此處呼叫） ──────────────────────
-        # 若放到外部呼叫，可能因時機不對而使 DiscordErrorHandler 無法收到訊息
+        # ── 掛載 Discord 錯誤通報 handler ──────────────────────
         self.log_manager.attach_bot(self)
 
         # ── 載入所有 Cog extension ──────────────────────
@@ -121,7 +130,6 @@ class FireflyBot(commands.Bot):
         logger.info("Cog 載入完成 | 成功=%d 失敗=%d", len(loaded), len(errors))
 
         # ── 自動同步 Slash Commands ──────────────────────
-        # 在 setup_hook 同步可確保指令在 on_ready 時已可使用
         try:
             synced = await self.tree.sync()
             logger.info("Slash Commands 同步完成 | 全域指令 %d 個", len(synced))
@@ -204,8 +212,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        # 攔截 Ctrl+C，避免 Python 印出大量 traceback
-        # 實際關閉流程已在 FireflyBot.close() 中處理
         print("Bot 關閉中...")
     except Exception:
         logger.exception("Bot 發生未處理例外")

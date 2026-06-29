@@ -2,13 +2,15 @@
 cogs/system/load.py
 
 Modification():
-- 統一檔案註解格式，保留原有職責說明。
 
-修正：
-- logger 改為透過 LogManager 取得，與全域 log 設定一致
-- 新增 _split_names 共用函式，統一解析逗號分隔的 extension 名稱
-- reload_all 失敗訊息改用 logger.exception 紀錄完整堆疊
-- 所有指令補上完整型別註記
+- Extension 名稱正規化，支援 chat、ai.chat、cogs.ai.chat 與 cogs/ai/chat.py。
+- logger 透過 LogManager 取得，與全域 log 設定一致。
+- _split_names 共用解析逗號分隔的 extension 名稱。
+- reload_all 失敗訊息使用 logger.exception 紀錄完整堆疊。
+
+Description():
+
+- 本檔提供 Owner 專用的 Cog 載入、卸載、重載與關閉指令。
 """
 
 from __future__ import annotations
@@ -28,6 +30,16 @@ _ACTION_LABELS: dict[str, str] = {
 }
 
 
+# ── extension 名稱正規化 ──────────────────────
+
+def _normalize_extension_name(extension: str) -> str:
+    """將使用者輸入轉為 discord.py load_extension() 需要的完整模組名。"""
+    name = extension.strip().removesuffix(".py").replace("/", ".").strip(".")
+    if name.startswith("cogs."):
+        return name
+    return f"cogs.{name}"
+
+
 # ── extension 載入 / 卸載 / 重載管理 ──────────────────────
 class Load(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
@@ -41,11 +53,11 @@ class Load(commands.Cog):
             "reload": self.bot.reload_extension,
         }
         label = _ACTION_LABELS[action]
-        module = f"cogs.{extension}"
+        module = _normalize_extension_name(extension)
 
         try:
             await actions[action](module)
-            await ctx.send(f"已{label} `{extension}`")
+            await ctx.send(f"已{label} `{module}`")
             logger.info("%s：%s（操作者：%s）", label, module, ctx.author)
 
         except commands.ExtensionNotFound:
@@ -61,7 +73,7 @@ class Load(commands.Cog):
     # ── 解析逗號分隔的 extension 名稱清單 ──────────────────────
     @staticmethod
     def _split_names(extensions: str) -> list[str]:
-        return [name.strip() for name in extensions.split(",") if name.strip()]
+        return [_normalize_extension_name(name) for name in extensions.split(",") if name.strip()]
 
     # ── 載入指令 ──────────────────────
     @commands.command(name="load", hidden=True)
