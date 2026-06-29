@@ -1,17 +1,18 @@
 """
 cogs/events/message.py
 
+職責：
+- 私訊轉發：將一般使用者發送的 DM 轉傳給 Bot Owner
+- Owner 回覆橋接：Owner 在 DM 中回覆轉發訊息時，自動送回原私訊者
+- 提供 last_dm_user_id 屬性，供 /reply 指令快速回覆最近一筆私訊
+
 Modification():
 
-- 移除伺服器訊息中的 bot.process_commands()，避免前綴指令被 Discord.py 與 Cog 各處理一次。
-- 將 Owner 回覆橋接整合進單一 on_message 入口，避免同一則 DM 被多個 listener 重複處理。
-- Owner 查詢加入快取，減少每則 DM 都呼叫 application_info() 的成本。
-- DM 轉發映射加入容量上限，避免長時間運行後無限制累積。
+- 新增 last_dm_user_id property（原本缺少此屬性）
+  /reply 指令（cogs/system/owner.py）透過 Messenger cog 讀取此值
+  來確定要回覆的對象，原版沒有此屬性導致 /reply 無法取得最近私訊者
+- 其他邏輯維持不變：Owner 解析快取、DM 映射容量上限、訊息轉發
 
-Description():
-
-- 本檔只負責私訊轉發與 Owner 回覆橋接。
-- 伺服器前綴指令由 commands.Bot 內建 on_message 處理，本 Cog 不再手動觸發。
 """
 
 from __future__ import annotations
@@ -33,10 +34,28 @@ class Messenger(commands.Cog):
     """私訊轉發與 Owner 回覆橋接。"""
 
     def __init__(self, bot: commands.Bot) -> None:
-        self.bot = bot
-        self._dm_map: OrderedDict[int, int] = OrderedDict()
-        self._owner_id: int | None = getattr(bot, "owner_id", None)
-        self._owner_user: discord.User | None = None
+        self.bot          = bot
+        # forward_message_id -> sender_user_id（OrderedDict 維持插入順序）
+        self._dm_map:      OrderedDict[int, int] = OrderedDict()
+        self._owner_id:    int | None            = getattr(bot, "owner_id", None)
+        self._owner_user:  discord.User | None   = None
+
+    # ── 公開屬性 ──────────────────────
+
+    @property
+    def last_dm_user_id(self) -> int | None:
+        """
+        回傳最近一筆私訊者的使用者 ID。
+
+        新增：/reply 指令（cogs/system/owner.py）依賴此屬性
+        來決定預設回覆對象；無紀錄時回傳 None。
+
+        _dm_map 以 OrderedDict 儲存，move_to_end() 確保最新的在尾端，
+        所以 reversed() 的第一個元素即為最近一筆。
+        """
+        if not self._dm_map:
+            return None
+        return next(reversed(self._dm_map.values()))
 
     # ── 訊息事件入口 ──────────────────────
 
@@ -75,13 +94,13 @@ class Messenger(commands.Cog):
             logger.error("[DM] 取得 application_info 失敗: %s", exc)
             return None
 
-        owner = app_info.owner
-        self._owner_id = owner.id
+        owner            = app_info.owner
+        self._owner_id   = owner.id
         self._owner_user = owner
         return owner
 
     async def _resolve_owner_id(self) -> int | None:
-        """取得 Owner ID；必要時會先解析 Owner 使用者。"""
+        """取得 Owner ID；必要時先解析 Owner 使用者。"""
         if self._owner_id:
             return self._owner_id
         owner = await self._resolve_owner()
@@ -90,7 +109,12 @@ class Messenger(commands.Cog):
     # ── DM 映射維護 ──────────────────────
 
     def _remember_forward(self, forward_message_id: int, sender_user_id: int) -> None:
-        """記住 Owner 端轉發訊息與原私訊者的對應關係。"""
+        """
+        記住 Owner 端轉發訊息與原私訊者的對應關係。
+
+        move_to_end() 確保最新的訊息排在尾端，
+        last_dm_user_id 才能正確取到最近一筆。
+        """
         self._dm_map[forward_message_id] = sender_user_id
         self._dm_map.move_to_end(forward_message_id)
 
@@ -131,6 +155,8 @@ class Messenger(commands.Cog):
             except discord.HTTPException as exc:
                 logger.warning("[DM] 附件轉發失敗 filename=%s: %s", attachment.filename, exc)
 
+    # ── Owner 回覆橋接 ──────────────────────
+
     async def _handle_owner_reply(self, message: discord.Message) -> bool:
         """Owner 在 DM 回覆轉發訊息時，將內容送回原私訊者。"""
         if message.reference is None or message.reference.message_id is None:
@@ -148,7 +174,7 @@ class Messenger(commands.Cog):
             return True
 
         try:
-            user = await self.bot.fetch_user(sender_id)
+            user   = await self.bot.fetch_user(sender_id)
             prefix = get_str("dm.owner_reply_prefix", "**Bot 回覆：**\n")
             if message.content:
                 await user.send(f"{prefix}{message.content}")
