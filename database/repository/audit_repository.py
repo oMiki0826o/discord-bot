@@ -1,6 +1,9 @@
 """
 database/repository/audit_repository.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 職責：
 - 管理指令操作紀錄（audit log）的純 SQL 查詢層
 - 不含業務邏輯，只做存取
@@ -17,7 +20,7 @@ from __future__ import annotations
 
 from database.ai.sqlite import get_connection
 
-# ── 初始化 ────────────────────────────────────────────────────────────
+# ── 初始化 ──────────────────────
 
 def init_tables() -> None:
     """建立 audit_log 資料表。"""
@@ -37,7 +40,7 @@ def init_tables() -> None:
     conn.commit()
     conn.close()
 
-# ── 寫入 ──────────────────────────────────────────────────────────────
+# ── 寫入 ──────────────────────
 
 def insert_log(
     actor_id:  str,
@@ -62,7 +65,7 @@ def insert_log(
     conn.commit()
     conn.close()
 
-# ── 查詢 ──────────────────────────────────────────────────────────────
+# ── 查詢 ──────────────────────
 
 def get_recent(limit: int = 20) -> list[dict]:
     """取得最近 N 筆操作紀錄，依時間降序。"""
@@ -87,5 +90,5 @@ def get_recent(limit: int = 20) -> list[dict]:
     ]
 
 
-# ── 啟動時建立資料表 ──────────────────────────────────────────────────
+# ── 啟動時建立資料表 ──────────────────────
 init_tables()

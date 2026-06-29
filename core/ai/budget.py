@@ -1,6 +1,9 @@
 """
 core/ai/budget.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 職責：
 - 記錄每次 API 呼叫的 Token 用量（實際值或估算值）
 - 記錄錯誤事件
@@ -39,7 +42,7 @@ from database.ai.sqlite import get_connection
 
 logger = logging.getLogger("bot.budget")
 
-# ── DB 初始化 ──────────────────────────────────────────────────────────
+# ── DB 初始化 ──────────────────────
 
 def _init() -> None:
     conn = get_connection()
@@ -75,7 +78,7 @@ def _init() -> None:
 
 _init()
 
-# ── 估算工具 ──────────────────────────────────────────────────────────
+# ── 估算工具 ──────────────────────
 
 def _estimate(text: str) -> int:
     """
@@ -98,7 +101,7 @@ def _extract_tokens(res) -> tuple[int, int, bool]:
             return int(inp), int(out), False   # 非估算
     return 0, 0, True   # 呼叫方補估算值
 
-# ── 寫入 ──────────────────────────────────────────────────────────────
+# ── 寫入 ──────────────────────
 
 def record_usage(
     user_id:      str,
@@ -157,7 +160,7 @@ def record_error(
     except Exception as e:
         logger.debug("[budget] record_error error: %s", e)
 
-# ── 查詢 ──────────────────────────────────────────────────────────────
+# ── 查詢 ──────────────────────
 
 def get_user_stats(user_id: str, days: int = 30) -> dict:
     """

@@ -1,6 +1,9 @@
 """
 database/repository/user_repository.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 職責：
 - 使用者資料的純 SQL 查詢層（Repository Pattern）
 - 涵蓋：等級、封鎖、互動計數、全域記憶、個人檔案、對話狀態
@@ -26,7 +29,7 @@ import json
 
 from database.ai.sqlite import get_connection
 
-# ── 初始化 ────────────────────────────────────────────────────────────
+# ── 初始化 ──────────────────────
 
 def init_tables() -> None:
     """建立所有使用者相關資料表。"""
@@ -76,7 +79,7 @@ def init_tables() -> None:
     conn.commit()
     conn.close()
 
-# ── Tier ──────────────────────────────────────────────────────────────
+# ── Tier ──────────────────────
 
 def get_tier(user_id: str) -> int:
     conn = get_connection()
@@ -102,7 +105,7 @@ def set_tier(user_id: str, tier: int) -> None:
     conn.commit()
     conn.close()
 
-# ── Ban ───────────────────────────────────────────────────────────────
+# ── Ban ──────────────────────
 
 def is_banned(user_id: str) -> bool:
     conn = get_connection()
@@ -133,7 +136,7 @@ def unban(user_id: str) -> None:
     conn.commit()
     conn.close()
 
-# ── 暫時限制（系統自動偵測異常行為）─────────────────────────────────
+# ── 暫時限制（系統自動偵測異常行為） ──────────────────────
 
 def get_temp_restriction(user_id: str) -> dict | None:
     """
@@ -176,7 +179,7 @@ def clear_temp_restriction(user_id: str) -> None:
     conn.commit()
     conn.close()
 
-# ── Interactions ──────────────────────────────────────────────────────
+# ── Interactions ──────────────────────
 
 def get_interaction_count(user_id: str) -> int:
     conn = get_connection()
@@ -210,7 +213,7 @@ def increment_interaction(user_id: str) -> int:
     conn.close()
     return count
 
-# ── Global Memories ───────────────────────────────────────────────────
+# ── Global Memories ──────────────────────
 
 def list_global_memories() -> list[tuple[str, str, int]]:
     conn = get_connection()
@@ -249,7 +252,7 @@ def delete_global_memory(keyword: str) -> bool:
     conn.close()
     return deleted
 
-# ── Profile ───────────────────────────────────────────────────────────
+# ── Profile ──────────────────────
 
 def get_profile(user_id: str) -> dict:
     conn = get_connection()
@@ -281,7 +284,7 @@ def save_profile(user_id: str, username: str, data: dict) -> None:
     conn.commit()
     conn.close()
 
-# ── State ─────────────────────────────────────────────────────────────
+# ── State ──────────────────────
 
 def get_state_row(user_id: str) -> dict | None:
     """
@@ -366,5 +369,5 @@ def list_active_states(now: float) -> list[dict]:
     ]
 
 
-# ── 啟動時建立資料表 ──────────────────────────────────────────────────
+# ── 啟動時建立資料表 ──────────────────────
 init_tables()

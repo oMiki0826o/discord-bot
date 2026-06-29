@@ -33,7 +33,7 @@ class WarmupEntry:
     cleanup_attr: str = ""
 
 
-# ── 預熱清單（新增只需在此追加）──────────────────────
+# ── 預熱清單（新增只需在此追加） ──────────────────────
 
 REGISTRY: tuple[WarmupEntry, ...] = (
     # 音樂服務

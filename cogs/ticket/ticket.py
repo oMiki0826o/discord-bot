@@ -32,7 +32,7 @@ import database.repository.ticket_repository as ticket_repo
 
 logger = logging.getLogger("bot.ticket")
 
-# ── 冷卻記憶體（重啟後清空，設計意圖如此）──────────────────────
+# ── 冷卻記憶體（重啟後清空，設計意圖如此） ──────────────────────
 
 _user_last_ticket: dict[str, float] = {}
 

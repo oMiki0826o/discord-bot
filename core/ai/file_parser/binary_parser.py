@@ -1,16 +1,14 @@
 """
 core/ai/file_parser/binary_parser.py
 
-修正（二進位識別，不解析內容）：
-- 不解析任何內容，只提供：MIME 類型、魔術字節識別、SHA-256 雜湊、檔案大小
-- 魔術字節識別使用內建查表（不需外部套件），涵蓋最常見的執行檔格式
-- 可選依賴 python-magic 做更精確的 MIME 偵測（pip install python-magic，需 libmagic）
-- 雜湊值讓 AI 可回報給使用者做完整性驗證，本模組自身不做安全掃描
+Modification():
+- 識別二進位檔案的 MIME、魔術字節、SHA-256 與檔案大小。
+- 移除本檔未使用的副檔名清單，支援格式統一由 constants.py 管理。
+- 保持只讀分析，不執行、不反組譯、不修改使用者檔案。
 
-啟用方式（未來）：
-1. constants.py 新增 BINARY_EXTENSIONS 集合
-2. registry.py 的 REGISTRY 加入：
-       **{ext: binary_parser.parse for ext in BINARY_EXTENSIONS},
+職責：
+- 將二進位附件轉成安全、可描述的基本指紋資訊。
+- 提供完整性驗證線索，不承諾惡意程式掃描。
 """
 
 from __future__ import annotations
@@ -23,14 +21,7 @@ from core.ai.file_parser.models import ParsedFile
 
 logger = logging.getLogger("bot.file_parser.binary")
 
-_BINARY_EXTENSIONS: frozenset[str] = frozenset({
-    ".exe", ".dll", ".so", ".dylib",
-    ".bin", ".dat", ".img", ".iso",
-    ".class", ".jar", ".war", ".ear",
-    ".pyc", ".pyd",
-})
-
-# ── 常見魔術字節查表（無需 libmagic）────────────────────────────────────
+# ── 常見魔術字節查表（無需 libmagic） ──────────────────────
 
 _MAGIC_SIGNATURES: list[tuple[bytes, str]] = [
     (b"MZ",                       "Windows PE 執行檔 / DLL"),
@@ -71,18 +62,18 @@ def parse(path: Path, filename: str, size_bytes: int) -> ParsedFile:
 def _parse_binary(
     path: Path, filename: str, ext: str, size_bytes: int,
 ) -> ParsedFile:
-    # ── 讀取前 512 bytes 做魔術字節識別（不讀全部，省記憶體）──
+    # ── 讀取前 512 bytes 做魔術字節識別（不讀全部，省記憶體） ──────────────────────
     with path.open("rb") as f:
         header = f.read(512)
 
-    # ── 魔術字節識別 ──────────────────────────────────────
+    # ── 魔術字節識別 ──────────────────────
     identified = "(未能識別)"
     for signature, description in _MAGIC_SIGNATURES:
         if header.startswith(signature):
             identified = description
             break
 
-    # ── 可選：python-magic 做更精確識別 ──────────────────
+    # ── 可選：python-magic 做更精確識別 ──────────────────────
     mime_type = "(需 python-magic)"
     try:
         import magic  # type: ignore
@@ -92,7 +83,7 @@ def _parse_binary(
     except Exception as e:
         logger.debug("[binary_parser] magic failed: %s", e)
 
-    # ── SHA-256 雜湊（分塊讀取，不一次載入全部）──────────
+    # ── SHA-256 雜湊（分塊讀取，不一次載入全部） ──────────────────────
     sha256 = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):

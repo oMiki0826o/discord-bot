@@ -1,6 +1,9 @@
 """
 core/ai/json_utils.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 職責：
 - 提供 Gemini 回應中常見的 ```json ... ``` 包裝清理工具
 - 供 memory_manager（記憶擷取 / 摘要）與 user_context（profile 分析）共用

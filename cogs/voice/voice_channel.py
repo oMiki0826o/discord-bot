@@ -154,7 +154,7 @@ class VoiceChannel(commands.Cog):
         ch_name     = _render_name(template, member)
         user_limit  = settings.get("default_limit", 0) or int(_s_get('voice_channel.default_limit', 0))
 
-        # ── 建立頻道（與觸發頻道相同排序位置）──────────────────────
+        # ── 建立頻道（與觸發頻道相同排序位置） ──────────────────────
         try:
             new_channel = await guild.create_voice_channel(
                 name       = ch_name,
@@ -559,7 +559,7 @@ class VoiceChannel(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ── /vc forcedelete（管理員強制刪除）──────────────────────
+    # ── /vc forcedelete（管理員強制刪除） ──────────────────────
 
     @vc_group.command(name="forcedelete", description="管理員強制刪除指定臨時頻道")
     @app_commands.describe(channel="要強制刪除的語音頻道")

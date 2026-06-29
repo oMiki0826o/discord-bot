@@ -1,6 +1,9 @@
 """
 tests/test_content_guard.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 測試 core.ai.content_guard：
 - 檔案不存在 / 為空時回傳空字串（功能預設不影響任何行為）
 - "#" 開頭的註解行會被過濾

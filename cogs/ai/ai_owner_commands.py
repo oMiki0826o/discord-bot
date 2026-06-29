@@ -1,6 +1,9 @@
 """
 cogs/ai/ai_owner_commands.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 修正（重構）：
 - 修正 import 路徑：from core.user_context → from core.ai.user_context
 - 全指令保留 @commands.is_owner() 保護
@@ -25,7 +28,7 @@ from discord.ext import commands
 from core.ai.abuse_guard import clear_restriction, is_restricted
 from core.ai.admin_service import log_admin_action
 
-# ── import 路徑修正（原路徑 core.user_context 為錯誤路徑）──────────────────────
+# ── import 路徑修正（原路徑 core.user_context 為錯誤路徑） ──────────────────────
 from core.ai.user_context import (
     ban_user,
     dump_social,
@@ -108,7 +111,7 @@ class AiOwnerCommands(commands.Cog):
         )
         await ctx.reply(f"已解除 **{member.display_name}** 的封鎖")
 
-    # ── 暫時限制解除（系統自動偵測誤判時手動解除）──────────────────────
+    # ── 暫時限制解除（系統自動偵測誤判時手動解除） ──────────────────────
 
     @commands.command(name="unrestrict")
     @commands.is_owner()

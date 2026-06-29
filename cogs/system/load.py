@@ -1,6 +1,9 @@
 """
 cogs/system/load.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 修正：
 - logger 改為透過 LogManager 取得，與全域 log 設定一致
 - 新增 _split_names 共用函式，統一解析逗號分隔的 extension 名稱
@@ -17,7 +20,7 @@ from core.logging.log import LogManager
 # ── logger ──────────────────────
 logger = LogManager().get_logger("cogs.system.load")
 
-# ── 動作名稱對應（中文顯示用）──────────────────────
+# ── 動作名稱對應（中文顯示用） ──────────────────────
 _ACTION_LABELS: dict[str, str] = {
     "load": "載入",
     "unload": "卸載",

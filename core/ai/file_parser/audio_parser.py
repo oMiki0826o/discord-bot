@@ -1,16 +1,14 @@
 """
 core/ai/file_parser/audio_parser.py
 
-修正（第三階段預留）：
-- 分析音訊 Metadata：時長、取樣率、聲道數、位元率、格式標籤（標題/藝人/專輯）
-- STT 語音轉文字（openai-whisper / faster-whisper）：第三階段，有需求再評估
-- 時長限制：MAX_AUDIO_DURATION，防止長錄音阻塞 event loop
-- CPU 密集（STT），需排程至執行緒池（__init__.py 已統一處理）
+Modification():
+- 解析音訊 Metadata：時長、取樣率、聲道數、位元率與常見標籤。
+- 改用 constants.py 的 MAX_AUDIO_DURATION，移除本檔硬編碼限制。
+- STT 語音轉文字保留為後續擴充點。
 
-啟用方式（未來）：
-1. constants.py 新增 AUDIO_EXTENSIONS 與 MAX_AUDIO_DURATION 常數
-2. registry.py 的 REGISTRY 加入：
-       **{ext: audio_parser.parse for ext in AUDIO_EXTENSIONS},
+職責：
+- 將音訊附件轉成可放入 prompt 的摘要資訊。
+- 不在此階段執行高成本 STT，避免阻塞 Discord Bot。
 """
 
 from __future__ import annotations
@@ -18,20 +16,14 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from core.ai.file_parser.constants import MAX_AUDIO_DURATION
 from core.ai.file_parser.models import ParsedFile
 
 logger = logging.getLogger("bot.file_parser.audio")
 
-# ── 未來需要的依賴（目前未啟用）────────────────────────────────────────
+# ── 可選依賴 ──────────────────────
 # pip install mutagen
 # pip install openai-whisper   # STT（第三階段）
-
-# 音訊時長上限（秒）— 未來移至 constants.py
-_MAX_AUDIO_DURATION = 300   # 5 分鐘
-
-_AUDIO_EXTENSIONS: frozenset[str] = frozenset({
-    ".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac",
-})
 
 
 def parse(path: Path, filename: str, size_bytes: int) -> ParsedFile:
@@ -74,18 +66,18 @@ def _parse_audio(
     channels   = getattr(audio.info, "channels", None)
     bitrate    = getattr(audio.info, "bitrate", None)
 
-    # ── 時長限制警告（STT 啟用後才有實際效果）──────────────
+    # ── 時長限制警告（STT 啟用後才有實際效果） ──────────────────────
     duration_str = ""
     if duration is not None:
         mins, secs = divmod(int(duration), 60)
         duration_str = f"{mins}:{secs:02d}"
-        if duration > _MAX_AUDIO_DURATION:
+        if duration > MAX_AUDIO_DURATION:
             logger.info(
                 "[audio_parser] 時長 %.0f 秒超過上限 %d 秒，STT 時將截斷",
-                duration, _MAX_AUDIO_DURATION,
+                duration, MAX_AUDIO_DURATION,
             )
 
-    # ── 標籤資訊（mutagen easy tag）─────────────────────────
+    # ── 標籤資訊（mutagen easy tag） ──────────────────────
     tag_lines: list[str] = []
     for key in ("title", "artist", "album", "date", "genre"):
         vals = audio.get(key)
@@ -106,7 +98,7 @@ def _parse_audio(
         lines.append("標籤資訊：")
         lines.extend(tag_lines)
 
-    # ── TODO（第三階段）：STT ──────────────────────────────
+    # ── TODO（第三階段）：STT ──────────────────────
     # if duration and duration <= _MAX_AUDIO_DURATION:
     #     import whisper
     #     model = whisper.load_model("small")

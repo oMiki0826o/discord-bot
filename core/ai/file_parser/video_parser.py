@@ -1,16 +1,14 @@
 """
 core/ai/file_parser/video_parser.py
 
-修正（第三階段預留）：
-- 分析影片 Metadata：時長、解析度、幀率、影片/音訊編碼、檔案大小
-- 抽幀（ffmpeg / opencv）：第三階段，有需求再評估
-- 音訊分離後 STT：整合 audio_parser + Whisper，第三階段
-- 時長限制：MAX_VIDEO_DURATION，防止長影片阻塞
+Modification():
+- 解析影片 Metadata：時長、解析度、幀率、影片/音訊編碼與檔案大小。
+- 改用 constants.py 的 MAX_VIDEO_DURATION，移除本檔硬編碼限制。
+- 抽幀與音訊 STT 保留為後續擴充點。
 
-啟用方式（未來）：
-1. constants.py 新增 VIDEO_EXTENSIONS 與 MAX_VIDEO_DURATION 常數
-2. registry.py 的 REGISTRY 加入：
-       **{ext: video_parser.parse for ext in VIDEO_EXTENSIONS},
+職責：
+- 將影片附件轉成可放入 prompt 的摘要資訊。
+- 不在此階段執行高成本抽幀或轉錄。
 """
 
 from __future__ import annotations
@@ -20,17 +18,10 @@ import logging
 import subprocess
 from pathlib import Path
 
+from core.ai.file_parser.constants import MAX_VIDEO_DURATION
 from core.ai.file_parser.models import ParsedFile
 
 logger = logging.getLogger("bot.file_parser.video")
-
-# ── 時長上限（秒）— 未來移至 constants.py ────────────────────────────────
-_MAX_VIDEO_DURATION = 120   # 2 分鐘
-
-_VIDEO_EXTENSIONS: frozenset[str] = frozenset({
-    ".mp4", ".mov", ".webm", ".mkv", ".avi", ".flv",
-})
-
 
 def parse(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     """解析影片 Metadata，抽幀與 STT 於第三階段加入。"""
@@ -54,7 +45,7 @@ def _parse_video(
     ffprobe 是 CLI 工具，通常隨 ffmpeg 一起安裝（apt install ffmpeg）。
     不需要 Python 套件，但需要系統路徑中存在 ffprobe。
     """
-    # ── ffprobe 可用性確認 ────────────────────────────────
+    # ── ffprobe 可用性確認 ──────────────────────
     try:
         result = subprocess.run(
             [
@@ -85,7 +76,7 @@ def _parse_video(
             error=f"ffprobe 失敗：{result.stderr[:200]}",
         )
 
-    # ── 解析 ffprobe JSON 輸出 ─────────────────────────────
+    # ── 解析 ffprobe JSON 輸出 ──────────────────────
     try:
         info   = json.loads(result.stdout)
     except json.JSONDecodeError as e:
@@ -106,7 +97,7 @@ def _parse_video(
         f"檔案大小：{size_bytes // 1024} KB",
     ]
 
-    # ── 分流各媒體串流資訊 ─────────────────────────────────
+    # ── 分流各媒體串流資訊 ──────────────────────
     for s in streams:
         codec_type = s.get("codec_type", "")
         codec_name = s.get("codec_name", "未知")
@@ -119,12 +110,12 @@ def _parse_video(
             ch  = s.get("channels", "")
             lines.append(f"音訊串流：{codec_name}  {sr} Hz  {ch}ch")
 
-    if duration > _MAX_VIDEO_DURATION:
+    if duration > MAX_VIDEO_DURATION:
         logger.info(
             "[video_parser] 時長 %.0f 秒超過上限 %d 秒，抽幀時將截斷",
-            duration, _MAX_VIDEO_DURATION,
+            duration, MAX_VIDEO_DURATION,
         )
-        lines.append(f"[時長超過 {_MAX_VIDEO_DURATION} 秒，第三階段 STT/抽幀時將截斷]")
+        lines.append(f"[時長超過 {MAX_VIDEO_DURATION} 秒，第三階段 STT/抽幀時將截斷]")
 
     # ── TODO（第三階段）：抽幀 + STT ──────────────────────
     # if duration <= _MAX_VIDEO_DURATION:

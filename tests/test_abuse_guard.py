@@ -1,6 +1,9 @@
 """
 tests/test_abuse_guard.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 測試 core.ai.abuse_guard：
 - 滑動視窗計數與門檻判斷
 - 觸發限制後的拒絕訊息與 is_restricted()

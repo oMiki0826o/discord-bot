@@ -30,7 +30,7 @@ from core.system.startup_registry import run_warmup
 from core.system.settings         import get
 from startup                      import initialize
 
-# ── 全域 LogManager（Singleton，整個 process 只建立一次）──────────────────────
+# ── 全域 LogManager（Singleton，整個 process 只建立一次） ──────────────────────
 log_manager = LogManager()
 logger      = log_manager.get_logger("bot")
 
@@ -99,7 +99,7 @@ class FireflyBot(commands.Bot):
     async def setup_hook(self) -> None:
         logger.info("setup_hook 開始")
 
-        # ── 同步預載（在執行緒中執行，不阻塞 event loop）──────────────────────
+        # ── 同步預載（在執行緒中執行，不阻塞 event loop） ──────────────────────
         await asyncio.to_thread(initialize)
 
         # ── 預熱核心模組 ──────────────────────
@@ -108,7 +108,7 @@ class FireflyBot(commands.Bot):
         if failed:
             logger.warning("預熱失敗模組: %s", [r.module for r in failed])
 
-        # ── 掛載 Discord 錯誤通報 handler（必須在此處呼叫）──────────────────────
+        # ── 掛載 Discord 錯誤通報 handler（必須在此處呼叫） ──────────────────────
         # 若放到外部呼叫，可能因時機不對而使 DiscordErrorHandler 無法收到訊息
         self.log_manager.attach_bot(self)
 
@@ -152,7 +152,7 @@ class FireflyBot(commands.Bot):
         logger.info("  啟動耗時      : %.2f 秒", startup_elapsed)
         logger.info(separator)
 
-    # ── sync_slash（供管理指令手動呼叫）──────────────────────
+    # ── sync_slash（供管理指令手動呼叫） ──────────────────────
 
     async def sync_slash(self, guild: discord.Guild | None = None) -> list:
         """手動同步 Slash Commands，供 $slash / $slash_guild 指令呼叫。"""
@@ -164,7 +164,7 @@ class FireflyBot(commands.Bot):
         logger.info("Slash Commands 已同步 | %d 個指令", len(synced))
         return synced
 
-    # ── refresh_presence（供 $settings reload 呼叫）──────────────────────
+    # ── refresh_presence（供 $settings reload 呼叫） ──────────────────────
 
     async def refresh_presence(self) -> None:
         """從 settings.json 重新套用 Discord 狀態。"""
@@ -172,12 +172,12 @@ class FireflyBot(commands.Bot):
         await self.change_presence(activity=activity, status=status)
         logger.info("Bot 狀態已重新套用")
 
-    # ── close（優雅關閉）──────────────────────
+    # ── close（優雅關閉） ──────────────────────
 
     async def close(self) -> None:
         logger.info("Bot 關閉中...")
 
-        # ── 發送關機報告（限時 10 秒，避免卡死）──────────────────────
+        # ── 發送關機報告（限時 10 秒，避免卡死） ──────────────────────
         log_mgr = getattr(self, "log_manager", None)
         if log_mgr is not None:
             try:

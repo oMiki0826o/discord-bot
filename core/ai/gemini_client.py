@@ -1,6 +1,9 @@
 """
 core/ai/gemini_client.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 職責：
 - 提供全專案共用的單一 google.genai.Client 實例
 

@@ -42,7 +42,7 @@ _YTDL_BASE: dict[str, Any] = {
 _YTDL_SINGLE   = yt_dlp.YoutubeDL({**_YTDL_BASE, "noplaylist": True})
 _YTDL_PLAYLIST = yt_dlp.YoutubeDL({**_YTDL_BASE, "noplaylist": False})
 
-# ── FFmpeg 配置（斷線自動重連）──────────────────────
+# ── FFmpeg 配置（斷線自動重連） ──────────────────────
 
 def _ffmpeg_opts() -> dict[str, str]:
     """從 settings 讀取 ffmpeg 路徑，組裝 FFmpeg 選項。"""

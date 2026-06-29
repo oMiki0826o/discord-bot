@@ -1,6 +1,9 @@
 """
 database/ai/sqlite.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 職責：
 - 提供統一的 SQLite 連線入口
 - 設定 row_factory = sqlite3.Row，使所有查詢結果可用欄位名稱存取
@@ -17,14 +20,14 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-# ── 路徑 ─────────────────────────────────────────────────────────────
+# ── 路徑 ──────────────────────
 
 # 從此檔案向上兩層取得專案根目錄
 # database/ai/sqlite.py → database/ai → database → 根目錄
 _ROOT = Path(__file__).resolve().parents[2]
 _DB   = _ROOT / "database" / "ai" / "memory.db"
 
-# ── 公開函式 ──────────────────────────────────────────────────────────
+# ── 公開函式 ──────────────────────
 
 def get_connection() -> sqlite3.Connection:
     """

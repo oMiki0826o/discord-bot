@@ -1,6 +1,9 @@
 """
 database/repository/memory_repository.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 職責：
 - 訊息、長期記憶、向量記憶、摘要的純 SQL 查詢層
 - 不含任何業務邏輯（排序、評分、背景任務等），只做存取
@@ -50,13 +53,13 @@ from pathlib import Path
 
 from database.ai.sqlite import get_connection
 
-# ── 常數 ──────────────────────────────────────────────────────────────
+# ── 常數 ──────────────────────
 
 _MSG_LIMIT   = 200     # 每位使用者保留的訊息上限
 _MSG_MAX_LEN = 2_000   # 單筆訊息最大字元數
 _BG_FILE     = Path(__file__).resolve().parents[2] / "database" / "ai" / "background.txt"
 
-# ── 初始化 ────────────────────────────────────────────────────────────
+# ── 初始化 ──────────────────────
 
 def init_tables() -> None:
     """建立所有記憶相關資料表，並對既有資料庫做欄位遷移。"""
@@ -103,7 +106,7 @@ def init_tables() -> None:
             ON vector_memories(user_id);
     """)
 
-    # ── 相容性遷移：舊資料庫的 messages 表可能沒有 channel_id ──────────
+    # ── 相容性遷移：舊資料庫的 messages 表可能沒有 channel_id ──────────────────────
     # CREATE TABLE IF NOT EXISTS 不會幫既有資料表補欄位，
     # 需手動檢查並以 ALTER TABLE 補上，預設值 '' 不影響舊資料查詢。
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
@@ -120,7 +123,7 @@ def init_tables() -> None:
     conn.commit()
     conn.close()
 
-# ── Messages ──────────────────────────────────────────────────────────
+# ── Messages ──────────────────────
 
 def insert_message(user_id: str, role: str, content: str, channel_id: str = "") -> None:
     """
@@ -241,7 +244,7 @@ def get_messages_excluding_recent(
     conn.close()
     return [(r["role"], r["content"]) for r in rows]
 
-# ── Memories ──────────────────────────────────────────────────────────
+# ── Memories ──────────────────────
 
 def upsert_memory(
     user_id:    str,
@@ -284,7 +287,7 @@ def get_memories_candidate(
     conn.close()
     return [(r["keyword"], r["content"], r["importance"]) for r in rows]
 
-# ── Vector Memories ───────────────────────────────────────────────────
+# ── Vector Memories ──────────────────────
 
 def upsert_vector(
     user_id:    str,
@@ -347,7 +350,7 @@ def count_vectors(user_id: str = "") -> int:
     conn.close()
     return n
 
-# ── Summaries ─────────────────────────────────────────────────────────
+# ── Summaries ──────────────────────
 
 def get_summary(user_id: str) -> str:
     conn = get_connection()
@@ -383,9 +386,9 @@ def count_summaries() -> int:
     conn.close()
     return n
 
-# ── Background Memories ───────────────────────────────────────────────
+# ── Background Memories ──────────────────────
 
-# ── 區塊標題格式：【標題】開頭一行 ────────────────────────────────────
+# ── 區塊標題格式：【標題】開頭一行 ──────────────────────
 _SECTION_RE = re.compile(r"^【(.+?)】\s*$")
 
 
@@ -464,5 +467,5 @@ def load_background() -> list[tuple[str, str, int]]:
     return result
 
 
-# ── 啟動時建立資料表 ──────────────────────────────────────────────────
+# ── 啟動時建立資料表 ──────────────────────
 init_tables()

@@ -1,6 +1,9 @@
 """
 core/ai/file_parser/code_parser.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 修正（程式碼解析）：
 - 支援所有 CODE_EXTENSIONS 副檔名
 - 提取 import / class / function 結構（Python 用 ast；其他用 regex）
@@ -20,7 +23,7 @@ from core.ai.file_parser.encoding import decode_bytes
 
 logger = logging.getLogger("bot.file_parser.code")
 
-# ── 副檔名 → 語言名稱對應 ────────────────────────────────────────────────
+# ── 副檔名 → 語言名稱對應 ──────────────────────
 
 _EXT_LANG: dict[str, str] = {
     ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
@@ -35,7 +38,7 @@ _EXT_LANG: dict[str, str] = {
     ".lua": "Lua", ".dart": "Dart",
 }
 
-# ── 主要入口 ─────────────────────────────────────────────────────────────
+# ── 主要入口 ──────────────────────
 
 def parse(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     """解析程式碼檔案，回傳含結構資訊的 ParsedFile。"""
@@ -52,7 +55,7 @@ def parse(path: Path, filename: str, size_bytes: int) -> ParsedFile:
             language=lang, error=str(e),
         )
 
-    # ── 結構提取（失敗不中斷）────────────────────────────
+    # ── 結構提取（失敗不中斷） ──────────────────────
     imports, classes, functions = [], [], []
     try:
         if ext == ".py":
@@ -72,7 +75,7 @@ def parse(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     )
 
 
-# ── Python：使用 ast 精確提取 ────────────────────────────────────────────
+# ── Python：使用 ast 精確提取 ──────────────────────
 
 def _extract_python(
     source: str,
@@ -111,7 +114,7 @@ def _extract_python(
     return dedup(imports), dedup(classes), dedup(functions)
 
 
-# ── 其他語言：Regex 粗提取 ───────────────────────────────────────────────
+# ── 其他語言：Regex 粗提取 ──────────────────────
 
 # 各語言的 import 樣式
 _IMPORT_PATTERNS: dict[str, str] = {

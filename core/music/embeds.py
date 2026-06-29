@@ -121,7 +121,7 @@ def playlist_added_embed(songs: list[Song]) -> discord.Embed:
     return embed
 
 
-# ── 佇列清單（分頁）──────────────────────
+# ── 佇列清單（分頁） ──────────────────────
 
 def queue_embed(queue: MusicQueue, page: int = 1, per_page: int = _PER_PAGE) -> discord.Embed:
     songs       = queue.songs

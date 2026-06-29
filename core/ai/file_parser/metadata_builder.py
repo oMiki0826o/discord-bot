@@ -1,6 +1,9 @@
 """
 core/ai/file_parser/metadata_builder.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 修正（AI 分析前置資訊）：
 - AI 分析前必須建立 Metadata，避免 AI 缺乏檔案背景資訊
 - 接收 ParsedFile 列表，彙整成可插入 prompt 的背景文字區塊
@@ -37,11 +40,11 @@ def build_metadata(files: list[ParsedFile]) -> str:
     ok_cnt  = sum(1 for f in files if f.error is None)
     err_cnt = total - ok_cnt
 
-    # ── 類型分布 ──────────────────────────────────────────
+    # ── 類型分布 ──────────────────────
     cat_counter: Counter[str] = Counter(f.category for f in files)
     cat_str = "  ".join(f"{c}×{n}" for c, n in cat_counter.most_common())
 
-    # ── 語言分布（code 類才有 language）───────────────────
+    # ── 語言分布（code 類才有 language） ──────────────────────
     lang_counter: Counter[str] = Counter(
         f.language for f in files if f.category == "code" and f.language
     )
@@ -50,10 +53,10 @@ def build_metadata(files: list[ParsedFile]) -> str:
         if lang_counter else ""
     )
 
-    # ── 總文字量 ──────────────────────────────────────────
+    # ── 總文字量 ──────────────────────
     total_chars = sum(len(f.content) for f in files if f.error is None)
 
-    # ── 失敗清單 ──────────────────────────────────────────
+    # ── 失敗清單 ──────────────────────
     errors = [f"  - {f.filename}：{f.error}" for f in files if f.error]
 
     lines = [f"=== 附件概覽（共 {total} 個）==="]

@@ -1,6 +1,9 @@
 """
 tests/test_agent_router.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 測試 core.ai.agent_router 的「純規則」路由邏輯：
 - 模型選擇（使用者指定 > 搜尋需求 > 內容判斷 > 預設）
 - 不測試 execute_tools()，因為它會實際呼叫 memory_manager /

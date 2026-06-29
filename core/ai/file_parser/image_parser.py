@@ -1,6 +1,9 @@
 """
 core/ai/file_parser/image_parser.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 修正（第二階段預留，目前圖片走多模態路線）：
 - 分析圖片 Metadata：尺寸、格式、色彩模式、DPI、EXIF 資訊
 - 目前圖片由 cogs/ai/chat.py 直接讀取 bytes 組成 Gemini types.Part，
@@ -24,7 +27,7 @@ from core.ai.file_parser.models import ParsedFile
 
 logger = logging.getLogger("bot.file_parser.image")
 
-# ── 未來需要的依賴（目前未啟用）────────────────────────────────────────
+# ── 未來需要的依賴（目前未啟用） ──────────────────────
 # pip install Pillow pytesseract
 # apt-get install tesseract-ocr tesseract-ocr-chi-tra  # 繁中 OCR 語料包
 
@@ -64,7 +67,7 @@ def _parse_image(
         mode   = img.mode
         fmt    = img.format or ext.lstrip(".").upper()
 
-        # ── EXIF 提取（JPEG / TIFF 常見，PNG 無）──────────
+        # ── EXIF 提取（JPEG / TIFF 常見，PNG 無） ──────────────────────
         exif_lines: list[str] = []
         try:
             raw_exif = img._getexif()  # type: ignore[attr-defined]
@@ -89,7 +92,7 @@ def _parse_image(
         lines.append("EXIF 資訊：")
         lines.extend(exif_lines)
 
-    # ── TODO（第二階段）：OCR ──────────────────────────────
+    # ── TODO（第二階段）：OCR ──────────────────────
     # try:
     #     import pytesseract
     #     ocr_text = pytesseract.image_to_string(img, lang="chi_tra+eng")

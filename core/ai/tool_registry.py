@@ -1,6 +1,9 @@
 """
 core/ai/tool_registry.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 修正（工具可插拔架構）：
 - 新增 ToolEntry 結構與 TOOL_REGISTRY 註冊表（tuple），
   風格與 core/system/startup_registry.py 的 WarmupEntry / REGISTRY 完全對齊
@@ -18,7 +21,7 @@ from typing import Awaitable, Callable
 
 logger = logging.getLogger("bot.tool_registry")
 
-# ── 型別定義 ─────────────────────────────────────────────────────────────
+# ── 型別定義 ──────────────────────
 
 # trigger：接收 (prompt, route_context)，回傳是否啟用此工具
 TriggerFn  = Callable[[str, dict], bool]
@@ -42,7 +45,7 @@ class ToolEntry:
     priority: int = 100
 
 
-# ── 各工具的觸發規則 ─────────────────────────────────────────────────────
+# ── 各工具的觸發規則 ──────────────────────
 # 規則邏輯從 agent_router.py 搬移至此，行為完全不變，純粹分離「規則」與「分派」。
 
 _MEMORY_KEYWORDS: tuple[str, ...] = (
@@ -83,7 +86,7 @@ def _trigger_profile(prompt: str, ctx: dict) -> bool:
     return any(k in p for k in _PROFILE_KEYWORDS)
 
 
-# ── 各工具的執行邏輯 ─────────────────────────────────────────────────────
+# ── 各工具的執行邏輯 ──────────────────────
 # 內部 import 避免循環依賴（與原 agent_router.execute_tools 行為一致）。
 
 async def _exec_memory(user_id: str, query: str) -> str:
@@ -118,7 +121,7 @@ async def _exec_profile(user_id: str, query: str) -> str:
     return ""
 
 
-# ── 工具註冊表（新增工具只需在此追加一行）───────────────────────────────
+# ── 工具註冊表（新增工具只需在此追加一行） ──────────────────────
 
 TOOL_REGISTRY: tuple[ToolEntry, ...] = (
     ToolEntry(name="memory",  trigger=_trigger_memory,  executor=_exec_memory,  priority=10),
@@ -127,7 +130,7 @@ TOOL_REGISTRY: tuple[ToolEntry, ...] = (
 )
 
 
-# ── 對外查詢介面 ─────────────────────────────────────────────────────────
+# ── 對外查詢介面 ──────────────────────
 
 def select_tools(prompt: str, route_context: dict | None = None) -> list[str]:
     """

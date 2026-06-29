@@ -1,25 +1,14 @@
 """
 core/ai/context_manager.py
 
-修正（整合 file_parser 解析結果）：
-- ContextBundle 新增 files 欄位，作為並行組裝的資料來源之一，
-  與既有的記憶/搜尋/工具結果並列，呼應 file_parser 設計文件的整合點
-- build() 新增 files 參數，由 cogs/ai/chat.py 在解析完附件後傳入
-- 原有職責不變：統一 Context 組裝流程、回傳 ContextBundle 供
-  prompt_builder 使用、並行執行各來源的資料抓取以減少串行延遲
+Modification():
+- ContextBundle 新增 files 欄位，用於承接 file_parser 解析後的附件內容。
+- build() 新增 channel_id 與 files 參數，修正記憶搜尋參數錯位問題。
+- 記憶搜尋與工具執行維持並行，降低單次 AI 回應延遲。
 
-Context 優先級（由 prompt_builder 決定排版）：
-1. SECURITY_NOTICE（injection 時）
-2. 使用者身份
-3. 狀態
-4. 個人偏好（profile）
-5. Tool 結果（memory / summary / profile）
-6. 快取搜尋結果
-7. 靜態記憶
-8. 附件解析內容（file_parser）
-9. 相關歷史訊息
-10. 最近對話
-11. 使用者輸入
+職責：
+- 統一收集 prompt_builder 所需的使用者資訊、記憶、工具結果與附件內容。
+- 確保短期對話 context 依 channel_id 隔離，避免跨伺服器或跨頻道串台。
 """
 
 from __future__ import annotations
@@ -29,19 +18,19 @@ import logging
 from dataclasses import dataclass, field
 
 from core.ai.agent_router import RouteDecision
-from core.ai.memory_manager import search as memory_search
 from core.ai.file_parser.models import ParsedFile
+from core.ai.memory_manager import search as memory_search
 from core.ai.user_context import (
-    get_user_info,
-    get_global_memories,
-    state_to_prompt,
-    profile_to_prompt,
     extend_state,
+    get_global_memories,
+    get_user_info,
+    profile_to_prompt,
+    state_to_prompt,
 )
 
 logger = logging.getLogger("bot.context_manager")
 
-# ── 資料結構 ──────────────────────────────────────────────────────────
+# ── 資料結構 ──────────────────────
 
 @dataclass
 class ContextBundle:
@@ -62,11 +51,12 @@ class ContextBundle:
     security_notice: bool                             = False
     max_length:      int                              = 12_000
 
-# ── 主要入口 ──────────────────────────────────────────────────────────
+# ── 主要入口 ──────────────────────
 
 async def build(
     user_id:            str,
     username:           str,
+    channel_id:         str,
     clean:              str,
     injection_detected: bool,
     route:              RouteDecision,
@@ -78,14 +68,15 @@ async def build(
     - 並行執行記憶搜尋 + tool 執行
     - 套用狀態滑動 TTL
     - 將快取搜尋結果作為額外 tool_section 注入
+    - channel_id：用於短期訊息與最近對話過濾，避免不同頻道混入 context
     - files：file_parser 已解析完成的附件結果，由 chat.py 傳入，
       本函式只負責原樣放入 ContextBundle，不重新觸發解析
     """
     user_info   = get_user_info(user_id, username)
     global_mems = get_global_memories()
 
-    # ── 並行取得記憶與 tool 結果 ──────────────────────────────
-    mem_task  = asyncio.create_task(_get_memory(user_id, clean, global_mems))
+    # ── 並行取得記憶與 tool 結果 ──────────────────────
+    mem_task  = asyncio.create_task(_get_memory(user_id, channel_id, clean, global_mems))
     tool_task = asyncio.create_task(_get_tools(route, user_id, clean))
 
     extend_state(user_id)   # 滑動 TTL
@@ -96,7 +87,7 @@ async def build(
     mem_bundle  = await mem_task
     tool_secs   = await tool_task
 
-    # ── 快取搜尋結果注入為最優先 tool_section ─────────────────
+    # ── 快取搜尋結果注入為最優先 tool_section ──────────────────────
     if cached_search:
         tool_secs.insert(0, f"=== 快取搜尋結果 ===\n{cached_search[:1_000]}")
 
@@ -124,13 +115,18 @@ async def build(
         security_notice = injection_detected,
     )
 
-# ── 內部工具 ──────────────────────────────────────────────────────────
+# ── 內部工具 ──────────────────────
 
-async def _get_memory(user_id: str, query: str, global_mems: list):
+async def _get_memory(
+    user_id: str,
+    channel_id: str,
+    query: str,
+    global_mems: list[tuple[str, str, int]],
+):
     """非同步包裝同步記憶搜尋（避免阻塞 event loop）。"""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        None, memory_search, user_id, query, global_mems,
+        None, memory_search, user_id, channel_id, query, global_mems,
     )
 
 

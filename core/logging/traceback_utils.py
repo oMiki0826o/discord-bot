@@ -1,6 +1,9 @@
 """
 core/logging/traceback_utils.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 修正：
 - 補上完整型別註記與 docstring
 - 維持原始切割邏輯，僅調整命名與註解格式

@@ -1,6 +1,9 @@
 """
 core/ai/admin_service.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 職責：
 - 提供 Dashboard 和 Info 指令所需的統計資料
 - 作為服務層（Service Layer），dashboard.py 不再直接操作 SQLite
@@ -51,7 +54,7 @@ from core.system import event_bus
 logger = logging.getLogger("bot.admin_service")
 
 
-# ── 全系統統計 ────────────────────────────────────────────────────────
+# ── 全系統統計 ──────────────────────
 
 def get_dashboard_data(bot) -> dict:
     """
@@ -99,7 +102,7 @@ def get_global_summary(hours: int = 24) -> dict:
     return get_global_stats(hours=hours)
 
 
-# ── 快取管理 ──────────────────────────────────────────────────────────
+# ── 快取管理 ──────────────────────
 
 def do_cache_cleanup() -> tuple[dict, int, dict]:
     """
@@ -112,7 +115,7 @@ def do_cache_cleanup() -> tuple[dict, int, dict]:
     return before, removed, after
 
 
-# ── 狀態管理 ──────────────────────────────────────────────────────────
+# ── 狀態管理 ──────────────────────
 
 def list_active_states() -> list[dict]:
     """
@@ -132,14 +135,14 @@ def list_active_states() -> list[dict]:
     ]
 
 
-# ── 社交資料 ──────────────────────────────────────────────────────────
+# ── 社交資料 ──────────────────────
 
 def get_social_dump() -> dict:
     """供 $社交 指令展示，取代舊版 social._load()。"""
     return dump_social()
 
 
-# ── 模板管理（委派 prompt_builder）──────────────────────────────────
+# ── 模板管理（委派 prompt_builder） ──────────────────────
 
 def get_templates() -> list[dict]:
     return list_templates()
@@ -157,13 +160,13 @@ def deactivate_template() -> None:
     deactivate()
 
 
-# ── 摘要 ──────────────────────────────────────────────────────────────
+# ── 摘要 ──────────────────────
 
 async def run_force_summarize(user_id: str) -> str:
     return await force_summarize(user_id)
 
 
-# ── Audit Log ─────────────────────────────────────────────────────────
+# ── Audit Log ──────────────────────
 
 async def _on_admin_action(
     actor_id:  str,
@@ -223,7 +226,7 @@ def get_audit_log(limit: int = 20) -> list[dict]:
 event_bus.on("admin_action", _on_admin_action)
 
 
-# ── 內容審核規則 ──────────────────────────────────────────────────────
+# ── 內容審核規則 ──────────────────────
 
 def get_moderation_rules() -> str:
     """取得目前生效的內容審核規則原文，供 $dashboard rules 顯示。"""

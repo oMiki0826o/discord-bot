@@ -1,6 +1,9 @@
 """
 core/ai/abuse_guard.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 職責：
 - 以滑動視窗追蹤每位使用者的請求頻率
 - 短時間內請求次數超過門檻時，自動施加暫時限制（temp_restriction）
@@ -32,11 +35,11 @@ import database.repository.user_repository as repo
 
 logger = logging.getLogger("bot.abuse_guard")
 
-# ── 全域狀態（記憶體，重啟自動清空）───────────────────────────────────
+# ── 全域狀態（記憶體，重啟自動清空） ──────────────────────
 
 _request_log: dict[str, deque[float]] = defaultdict(deque)
 
-# ── 對外入口 ──────────────────────────────────────────────────────────
+# ── 對外入口 ──────────────────────
 
 def check_and_record(user_id: str) -> tuple[bool, str | None]:
     """
@@ -49,13 +52,13 @@ def check_and_record(user_id: str) -> tuple[bool, str | None]:
     """
     now = time.monotonic()
 
-    # ── 1. 已有未過期的暫時限制 → 直接拒絕，不重複寫入 ────────
+    # ── 1. 已有未過期的暫時限制 → 直接拒絕，不重複寫入 ──────────────────────
     existing = repo.get_temp_restriction(user_id)
     if existing and existing["expires_at"] > time.time():
         remaining_min = int((existing["expires_at"] - time.time()) / 60) + 1
         return False, f"請求過於頻繁，暫時限制中，約 {remaining_min} 分鐘後解除"
 
-    # ── 2. 滑動視窗計數 ────────────────────────────────────────
+    # ── 2. 滑動視窗計數 ──────────────────────
     window = _request_log[user_id]
     window.append(now)
     while window and now - window[0] > int(_s('ai.abuse_window_seconds', 60)):
@@ -64,7 +67,7 @@ def check_and_record(user_id: str) -> tuple[bool, str | None]:
     if len(window) <= int(_s('ai.abuse_max_requests', 15)):
         return True, None
 
-    # ── 3. 超過門檻 → 觸發新的暫時限制 ────────────────────────
+    # ── 3. 超過門檻 → 觸發新的暫時限制 ──────────────────────
     expires_at = time.time() + int(_s('ai.abuse_restrict_minutes', 10)) * 60
     reason     = f"{int(_s('ai.abuse_window_seconds', 60))} 秒內請求 {len(window)} 次，超過門檻 {int(_s('ai.abuse_max_requests', 15))}"
     repo.set_temp_restriction(user_id, reason, expires_at)

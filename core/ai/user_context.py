@@ -1,6 +1,9 @@
 """
 core/ai/user_context.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 修正（重構）：
 - 修正 from core import event_bus → from core.ai import event_bus（正確路徑）
 - 移除 google.genai 以外的無用 import
@@ -32,7 +35,7 @@ from core.ai.gemini_client import client
 from core.ai.json_utils import strip_json_fence
 from core.ai.models import MODELS
 
-# ── import 路徑修正（原路徑 from core import event_bus 為錯誤路徑）──────────────────────
+# ── import 路徑修正（原路徑 from core import event_bus 為錯誤路徑） ──────────────────────
 from core.system import event_bus
 
 logger = logging.getLogger("bot.user_context")
@@ -119,7 +122,7 @@ def increment_interaction(user_id: str) -> int:
     return repo.increment_interaction(user_id)
 
 
-# ── 使用者資訊（統一入口）──────────────────────
+# ── 使用者資訊（統一入口） ──────────────────────
 
 def get_user_info(user_id: str, username: str = "") -> dict:
     """供 build_prompt 使用的扁平 dict（向下相容舊呼叫方式）。"""
@@ -306,7 +309,7 @@ async def update_profile_from_interaction(
         logger.debug("[user_context] profile error user=%s: %s", user_id, e)
 
 
-# ── 展示資料（供 $社交 指令使用）──────────────────────
+# ── 展示資料（供 $社交 指令使用） ──────────────────────
 
 def dump_social() -> dict:
     """

@@ -1,6 +1,9 @@
 """
 core/ai/file_parser/summary_builder.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 修正（截斷策略）：
 - 大型文字取頭尾，保留最有資訊量的部分
 - 程式碼取前段，通常 import 與頂層定義在前
@@ -13,7 +16,7 @@ from __future__ import annotations
 from core.ai.file_parser.constants import MAX_TEXT_CHARS
 
 
-# ── 截斷策略 ─────────────────────────────────────────────────────────────
+# ── 截斷策略 ──────────────────────
 
 def truncate(content: str, max_chars: int = MAX_TEXT_CHARS) -> tuple[str, bool]:
     """

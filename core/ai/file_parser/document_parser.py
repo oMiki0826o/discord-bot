@@ -1,6 +1,9 @@
 """
 core/ai/file_parser/document_parser.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 修正（文件類解析）：
 - 涵蓋 pdf / docx / xlsx / pptx 文字提取，統一輸出純文字
 - 本模組維持同步介面；CPU 密集的執行緒池調度統一由 __init__.py 的
@@ -25,7 +28,7 @@ logger = logging.getLogger("bot.file_parser.document")
 _MAX_XLSX_ROWS = 200
 
 
-# ── 主要入口 ─────────────────────────────────────────────────────────────
+# ── 主要入口 ──────────────────────
 
 def parse(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     """解析文件類檔案，回傳 ParsedFile（同步函式，由上層統一排程至執行緒池）。"""
@@ -41,7 +44,7 @@ def parse(path: Path, filename: str, size_bytes: int) -> ParsedFile:
         )
 
 
-# ── 格式分派 ─────────────────────────────────────────────────────────────
+# ── 格式分派 ──────────────────────
 
 def _dispatch(path: Path, filename: str, ext: str, size_bytes: int) -> ParsedFile:
     if ext == ".pdf":
@@ -77,7 +80,7 @@ def _dispatch(path: Path, filename: str, ext: str, size_bytes: int) -> ParsedFil
     )
 
 
-# ── PDF ──────────────────────────────────────────────────────────────────
+# ── PDF ──────────────────────
 
 def _parse_pdf(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     try:
@@ -118,7 +121,7 @@ def _parse_pdf(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     )
 
 
-# ── DOCX ─────────────────────────────────────────────────────────────────
+# ── DOCX ──────────────────────
 
 def _parse_docx(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     try:
@@ -150,7 +153,7 @@ def _parse_docx(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     )
 
 
-# ── XLSX ─────────────────────────────────────────────────────────────────
+# ── XLSX ──────────────────────
 
 def _parse_xlsx(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     try:
@@ -192,7 +195,7 @@ def _parse_xlsx(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     )
 
 
-# ── PPTX ─────────────────────────────────────────────────────────────────
+# ── PPTX ──────────────────────
 
 def _parse_pptx(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     try:

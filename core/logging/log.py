@@ -42,7 +42,7 @@ _DISCORD_LOGGERS: tuple[str, ...] = (
 )
 
 
-# ── 全域 Log 管理器（Singleton）──────────────────────
+# ── 全域 Log 管理器（Singleton） ──────────────────────
 
 class LogManager:
     """
@@ -76,14 +76,14 @@ class LogManager:
 
         self._setup_logging()
 
-    # ── logging 初始化（全域僅執行一次）──────────────────────
+    # ── logging 初始化（全域僅執行一次） ──────────────────────
 
     def _setup_logging(self) -> None:
         Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
 
         root = logging.getLogger()
 
-        # ── 防止重複掛載（掛在 root logger 物件上的旗標）──────────────────────
+        # ── 防止重複掛載（掛在 root logger 物件上的旗標） ──────────────────────
         if getattr(root, "_logmanager_initialized", False):
             return
         root._logmanager_initialized = True  # type: ignore[attr-defined]
@@ -98,7 +98,7 @@ class LogManager:
         file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
         file_handler.setFormatter(formatter)
 
-        # ── error 追蹤 handler（標記本次是否有 ERROR）──────────────────────
+        # ── error 追蹤 handler（標記本次是否有 ERROR） ──────────────────────
         tracker = _ErrorTracker(self)
         tracker.setLevel(logging.ERROR)
 
@@ -143,7 +143,7 @@ class LogManager:
             f"{sep}"
         )
 
-        # ── 寫入檔案（不透過 logging，避免格式被污染）──────────────────────
+        # ── 寫入檔案（不透過 logging，避免格式被污染） ──────────────────────
         try:
             with open(LOG_FILE, "a", encoding="utf-8") as f:
                 f.write(header + "\n")
@@ -158,7 +158,7 @@ class LogManager:
     def get_logger(self, name: str = "bot") -> logging.Logger:
         return logging.getLogger(name)
 
-    # ── 綁定 bot（掛載 DiscordErrorHandler）──────────────────────
+    # ── 綁定 bot（掛載 DiscordErrorHandler） ──────────────────────
 
     def attach_bot(self, bot: commands.Bot) -> None:
         """

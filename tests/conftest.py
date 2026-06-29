@@ -1,6 +1,9 @@
 """
 tests/conftest.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 職責：
 - 在任何專案模組被 import 之前，設定必要的環境變數
   （config.py 在 import 時就會檢查 DISCORD_TOKEN / GEMINI_API，
@@ -27,16 +30,16 @@ import sys
 import tempfile
 from pathlib import Path
 
-# ── 1. 環境變數（必須在任何專案模組 import 之前設定）────────────────
+# ── 1. 環境變數（必須在任何專案模組 import 之前設定） ──────────────────────
 os.environ.setdefault("DISCORD_TOKEN", "test-token")
 os.environ.setdefault("GEMINI_API", "test-gemini-key")
 
-# ── 2. 專案根目錄加入 sys.path ──────────────────────────────────────
+# ── 2. 專案根目錄加入 sys.path ──────────────────────
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-# ── 3. 搶先把 DB 路徑導向測試專用暫存目錄 ────────────────────────────
+# ── 3. 搶先把 DB 路徑導向測試專用暫存目錄 ──────────────────────
 import database.ai.sqlite as sqlite_mod  # noqa: E402
 
 _SESSION_TMP_DIR = Path(tempfile.mkdtemp(prefix="ai_bot_test_"))

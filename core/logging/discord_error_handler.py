@@ -34,7 +34,7 @@ _NOISE_LOGGER_PREFIXES: tuple[str, ...] = (
     "discord.voice_client",
 )
 
-# ── 已知噪音：訊息關鍵字（小寫比對）──────────────────────
+# ── 已知噪音：訊息關鍵字（小寫比對） ──────────────────────
 # 包含這些關鍵字的 error 通常是 ffmpeg / yt-dlp 一時性問題
 _NOISE_MESSAGE_KEYWORDS: tuple[str, ...] = (
     "ffmpeg",
@@ -101,7 +101,7 @@ class DiscordErrorHandler(logging.Handler):
     # ── logging.Handler 介面 ──────────────────────
 
     def emit(self, record: logging.LogRecord) -> None:
-        # ── bot 尚未就緒時不發送（setup_hook 期間的錯誤先放行至檔案）──────────────────────
+        # ── bot 尚未就緒時不發送（setup_hook 期間的錯誤先放行至檔案） ──────────────────────
         if not self.bot.is_ready():
             return
 
@@ -124,13 +124,13 @@ class DiscordErrorHandler(logging.Handler):
         header = f"[{record.levelname}] {record.name}\n{record.getMessage()}"
         await owner.send(header[:2000])
 
-        # ── 附上 traceback（分段發送）──────────────────────
+        # ── 附上 traceback（分段發送） ──────────────────────
         if record.exc_info:
             tb = "".join(traceback.format_exception(*record.exc_info))
             for chunk in split_traceback(tb):
                 await owner.send(chunk)
 
-    # ── 取得 bot owner（快取）──────────────────────
+    # ── 取得 bot owner（快取） ──────────────────────
 
     async def _get_owner(self) -> discord.User | None:
         if self._owner is not None:
@@ -192,7 +192,7 @@ async def send_shutdown_report(bot: discord.Client, had_errors: bool) -> None:
         log.info("關機報告：發生錯誤，已附上 log（%.1f MB）", log_size / 1024 / 1024)
 
 
-# ── setup（此模組非 cog，僅供 load_extension 相容）──────────────────────
+# ── setup（此模組非 cog，僅供 load_extension 相容） ──────────────────────
 
 async def setup(bot: discord.Client) -> None:
     pass

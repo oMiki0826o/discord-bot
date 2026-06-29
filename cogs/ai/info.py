@@ -1,6 +1,9 @@
 """
 cogs/ai/info.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 修正（重構）：
 - 修正 import 路徑：from core.admin_service → from core.ai.admin_service
 - 移除舊版 from core.ai.budget 直接 import
@@ -13,7 +16,7 @@ import time
 import discord
 from discord.ext import commands
 
-# ── import 路徑修正（原路徑 core.admin_service 為錯誤路徑）──────────────────────
+# ── import 路徑修正（原路徑 core.admin_service 為錯誤路徑） ──────────────────────
 from core.ai.admin_service import get_global_summary, get_user_data, run_force_summarize
 
 

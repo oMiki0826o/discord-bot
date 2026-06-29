@@ -1,14 +1,14 @@
 """
 core/ai/agent_router.py
 
-修正（工具決策移交 tool_registry）：
-- 模型選擇邏輯維持不變（原 router.py 合併）
-- 工具決策完全移交 tool_registry.py：_select_tools() 改為單純遍歷
-  TOOL_REGISTRY，本身不再包含任何工具專屬關鍵字或判斷邏輯
-- execute_tools() 改為透過 tool_registry.get_executor() 動態查表執行，
-  新增工具時本檔案完全不需修改
-- 移除 Tool Agent 二次 AI 呼叫（原 gemini-3.1-flash-lite 決策），
-  改為純規則路由，每次請求省去一次 Gemini API 呼叫，降低延遲約 500~1000ms
+Modification():
+- 將工具決策移交 tool_registry，路由器只負責模型與工具清單決策。
+- 改用 core.ai.models 的集中模型常數，移除本檔重複硬編碼模型名稱。
+- 保留純規則路由，不額外呼叫 AI，降低延遲與費用。
+
+職責：
+- 依 prompt 決定模型、搜尋需求與工具清單。
+- 提供 execute_tools() 並行執行已選工具。
 """
 
 from __future__ import annotations
@@ -17,22 +17,12 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 
-from core.ai.tool_registry import select_tools, get_executor
+from core.ai.models import DEFAULT_MODEL, GROUNDING_MIN_MODEL, MODELS, is_gemini
+from core.ai.tool_registry import get_executor, select_tools
 
 logger = logging.getLogger("bot.agent_router")
 
-# ── 可用模型 ──────────────────────────
-
-MODELS: dict[str, str] = {
-    "lite":  "gemini-3.1-flash-lite",
-    "flash": "gemini-2.5-flash",
-    "gemma": "gemma-4-31b-it",
-}
-
-DEFAULT_MODEL       = MODELS["gemma"]
-GROUNDING_MIN_MODEL = MODELS["flash"]
-
-# ── 模型選擇用關鍵字表 ──────────────────────────
+# ── 模型選擇用關鍵字表 ──────────────────────
 
 _WEB_KEYWORDS: tuple[str, ...] = (
     "最新", "新聞", "即時", "現在", "今天", "今日", "近期", "最近",
@@ -57,7 +47,7 @@ _PRO_KEYWORDS: tuple[str, ...] = (
     "分析", "報告", "論文", "架構", "設計",
 )
 
-# ── 資料結構 ──────────────────────────────────────────────────────────
+# ── 資料結構 ──────────────────────
 
 @dataclass
 class RouteDecision:
@@ -68,7 +58,7 @@ class RouteDecision:
     def needs(self, tool: str) -> bool:
         return tool in self.tools
 
-# ── 主要路由 ──────────────────────────────────────────────────────────
+# ── 主要路由 ──────────────────────
 
 def route(prompt: str) -> RouteDecision:
     """
@@ -88,22 +78,18 @@ def route(prompt: str) -> RouteDecision:
     return RouteDecision(model=model, use_search=use_search, tools=tools)
 
 
-def is_gemini(model: str) -> bool:
-    return model.lower().startswith("gemini-")
-
-
 def needs_web_search(prompt: str) -> bool:
     p = prompt.lower()
     return any(k in p for k in _WEB_KEYWORDS)
 
-# ── 模型選擇 ──────────────────────────────────────────────────────────
+# ── 模型選擇 ──────────────────────
 
 def _select_model(prompt: str) -> tuple[str, bool]:
     """回傳 (model, use_search)。"""
     p          = prompt.lower()
     use_search = needs_web_search(prompt)
 
-    # ── 1. 使用者明確指定 ──────────────────────────────
+    # ── 1. 使用者明確指定 ──────────────────────
     for keyword, model in _MODEL_OVERRIDES:
         if keyword in p:
             if use_search and not is_gemini(model):
@@ -115,19 +101,19 @@ def _select_model(prompt: str) -> tuple[str, bool]:
             logger.info("[agent_router] user_override=%s", model)
             return model, use_search
 
-    # ── 2. 需要搜尋 → 強制 Gemini ─────────────────────
+    # ── 2. 需要搜尋 → 強制 Gemini ──────────────────────
     if use_search:
         model = DEFAULT_MODEL if is_gemini(DEFAULT_MODEL) else GROUNDING_MIN_MODEL
         return model, True
 
-    # ── 3. 程式 / 數學 / 分析 → Flash ─────────────────
+    # ── 3. 程式 / 數學 / 分析 → Flash ──────────────────────
     if any(kw in p for kw in _PRO_KEYWORDS):
         return MODELS["flash"], False
 
-    # ── 4. 預設 ────────────────────────────────────────
+    # ── 4. 預設 ──────────────────────
     return DEFAULT_MODEL, False
 
-# ── Tool 執行 ────────────────────────────────────────────────────────
+# ── Tool 執行 ──────────────────────
 
 async def execute_tools(
     decision: RouteDecision,

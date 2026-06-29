@@ -1,6 +1,9 @@
 """
 core/ai/file_parser/__init__.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 修正（統一入口）：
 - 外部只呼叫 parse()，不直接操作內部模組（registry / 各 parser）
 - 內部流程：大小檢查 → 副檔名判斷 → 查 registry → 呼叫對應 parser
@@ -25,7 +28,7 @@ logger = logging.getLogger("bot.file_parser")
 __all__ = ["parse", "ParsedFile"]
 
 
-# ── 統一入口 ─────────────────────────────────────────────────────────────
+# ── 統一入口 ──────────────────────
 
 async def parse(path: Path | str, filename: str | None = None) -> ParsedFile:
     """
@@ -43,7 +46,7 @@ async def parse(path: Path | str, filename: str | None = None) -> ParsedFile:
     name = filename or path.name
     ext  = path.suffix.lower()
 
-    # ── 1. 大小檢查 ──────────────────────────────────────
+    # ── 1. 大小檢查 ──────────────────────
     try:
         size_bytes = path.stat().st_size
     except OSError as e:
@@ -65,7 +68,7 @@ async def parse(path: Path | str, filename: str | None = None) -> ParsedFile:
                   f"{MAX_FILE_SIZE // 1024}KB",
         )
 
-    # ── 2. 查詢 registry ─────────────────────────────────
+    # ── 2. 查詢 registry ──────────────────────
     parser_fn = get_parser(ext)
     if parser_fn is None:
         logger.info("[file_parser] 不支援的副檔名 file=%s ext=%s", name, ext)
@@ -74,7 +77,7 @@ async def parse(path: Path | str, filename: str | None = None) -> ParsedFile:
             size_bytes=size_bytes, error=f"不支援的檔案格式：{ext or '(無副檔名)'}",
         )
 
-    # ── 3. 執行緒池呼叫對應 parser（CPU 密集不阻塞 event loop）────
+    # ── 3. 執行緒池呼叫對應 parser（CPU 密集不阻塞 event loop） ──────────────────────
     try:
         result = await asyncio.to_thread(parser_fn, path, name, size_bytes)
         logger.debug(

@@ -31,7 +31,7 @@ import struct
 from dataclasses import dataclass
 
 
-# ── 物理常數（Minecraft 1.8+ 不變）──────────────────────
+# ── 物理常數（Minecraft 1.8+ 不變） ──────────────────────
 
 _GRAVITY: float        = 0.03
 _AIR_RESIST: float     = 0.98999994993209839   # float32(0.99) 的 float64 表示

@@ -37,7 +37,7 @@ _SETTINGS = _ROOT / "settings.json"
 _cache:      dict[str, Any] = {}
 _cache_mtime: float          = -1.0
 
-# ── 預設值（settings.json 缺欄時的回退）──────────────────────
+# ── 預設值（settings.json 缺欄時的回退） ──────────────────────
 
 _DEFAULTS: dict[str, Any] = {
     "bot.command_prefix":      "$",

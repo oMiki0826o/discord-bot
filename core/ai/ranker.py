@@ -1,21 +1,47 @@
 """
 core/ai/ranker.py
 
-職責：
-- 對記憶與歷史訊息依相關性排序
-- optimize_context 整合三個來源後回傳供 prompt_builder.build 使用
+Modification():
+- 對記憶與歷史訊息依相關性排序。
+- 增加 query / content / importance 的型別防護，避免非字串資料造成 runtime crash。
+- 保留詞彙交集加權排序，避免無關但高 importance 的記憶過度前排。
 
-修正：
-- memories 統一使用 3-tuple (keyword, content, importance)
-- _score 採詞彙交集 × 2 + importance 加權，避免無關記憶因 importance 高而排前
-- 移除舊版 context_optimizer.py（此檔取代之）
+職責：
+- 將 memory_manager 取回的候選資料整理成 prompt_builder 可直接使用的排序結果。
+- 對外提供 optimize_context() 作為 context 排序入口。
 """
 
 from __future__ import annotations
 
-# ── 評分 ─────────────────────────────────────────────────────────────
+from collections.abc import Iterable
 
-def _score(query: str, text: str, importance: int = 1) -> float:
+# ── 評分 ──────────────────────
+
+def _as_text(value: object) -> str:
+    """將外部資料安全轉成文字，避免 list / None 等資料造成 lower() 崩潰。"""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    if isinstance(value, dict):
+        return " ".join(f"{k} {v}" for k, v in value.items())
+    if isinstance(value, Iterable):
+        return " ".join(_as_text(item) for item in value)
+    return str(value)
+
+
+def _as_importance(value: object) -> int:
+    """將 importance 正規化為 1 到 5，避免資料庫或外部來源傳入異常值。"""
+    try:
+        importance = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(5, importance))
+
+
+def _score(query: object, text: object, importance: object = 1) -> float:
     """
     詞彙交集分數 + importance 加權。
 
@@ -24,14 +50,14 @@ def _score(query: str, text: str, importance: int = 1) -> float:
     ── importance 以加法計入，不做乘法，
        避免完全不相關的高重要度記憶排名超過相關的低重要度記憶
     """
-    q = set(query.lower().split())
-    t = set(text.lower().split())
-    return len(q & t) * 2 + importance
+    q = set(_as_text(query).lower().split())
+    t = set(_as_text(text).lower().split())
+    return len(q & t) * 2 + _as_importance(importance)
 
-# ── 記憶排序 ──────────────────────────────────────────────────────────
+# ── 記憶排序 ──────────────────────
 
 def rank_memories(
-    query:    str,
+    query:    object,
     memories: list[tuple[str, str, int]],
     limit:    int = 6,
 ) -> list[tuple[str, str, int]]:
@@ -40,16 +66,17 @@ def rank_memories(
     回傳：同格式，依相關性降序，取前 limit 筆。
     """
     scored = [
-        (_score(query, f"{kw} {content}", imp), kw, content, imp)
+        (_score(query, f"{_as_text(kw)} {_as_text(content)}", imp),
+         _as_text(kw), _as_text(content), _as_importance(imp))
         for kw, content, imp in memories
     ]
     scored.sort(reverse=True, key=lambda x: x[0])
     return [(kw, c, imp) for _, kw, c, imp in scored[:limit]]
 
-# ── 訊息排序 ──────────────────────────────────────────────────────────
+# ── 訊息排序 ──────────────────────
 
 def rank_messages(
-    query:    str,
+    query:    object,
     messages: list[tuple[str, str]],
     limit:    int = 8,
 ) -> list[tuple[str, str]]:
@@ -58,16 +85,16 @@ def rank_messages(
     回傳：同格式，依相關性降序，取前 limit 筆。
     """
     scored = [
-        (_score(query, content), role, content)
+        (_score(query, content), _as_text(role), _as_text(content))
         for role, content in messages
     ]
     scored.sort(reverse=True, key=lambda x: x[0])
     return [(role, content) for _, role, content in scored[:limit]]
 
-# ── 整合 ──────────────────────────────────────────────────────────────
+# ── 整合 ──────────────────────
 
 def optimize_context(
-    query:    str,
+    query:    object,
     memories: list[tuple[str, str, int]],
     messages: list[tuple[str, str]],
     recent:   list[tuple[str, str]],

@@ -1,38 +1,17 @@
 """
 core/ai/core.py
 
+Modification():
+- generate() 是 AI 對話唯一公開入口，負責協調路由、上下文、Prompt 與模型呼叫。
+- 新增 files / image_parts 參數，修正 Discord 附件傳入後 generate() 介面不一致的崩潰。
+- 多模態圖片會以 Gemini Part 送入模型；若路由選到非 Gemini，會自動切到 MULTIMODAL_MODEL。
+- channel_id 會一路傳給 context_manager 與 save_message，避免跨頻道串台。
+- client、模型名稱與 fallback 皆使用集中模組，避免重複硬編碼。
+
 職責：
-- generate() 唯一公開入口
-- 協調各服務層（context_manager / prompt_builder / agent_router / budget）
-- 不直接操作 DB，透過服務模組存取資料
-
-重構重點：
-- 解耦：將上下文收集、Prompt 組裝、模型路由各自委派給專責模組
-- event_bus：取代多個散落的 asyncio.create_task()，背景任務由模組自行注冊
-- 簡化後 generate() 主流程可一眼看清：封鎖 → 清理 → 路由 → 快取 → 上下文 → 呼叫 → 儲存 → 事件
-
-修正：
-- FALLBACK_MODEL 改由 core.ai.models 統一提供，移除硬編碼字串
-  （與 agent_router / memory_manager / user_context 共用同一份模型常數）
-- is_gemini 改為直接從 core.ai.models 匯入，不再透過
-  core.ai.agent_router 間接 re-export（agent_router 本身也是從
-  core.ai.models 匯入，直接引用來源更清楚）
-- client 改由 core.ai.gemini_client 統一提供，移除本檔的
-  genai.Client(api_key=GEMINI_API) 重複建立，並連帶移除
-  未使用的 genai / GEMINI_API import
-
-新增（channel_id）：
-- generate() 新增 channel_id 參數（呼叫端 cogs/ai/chat.py 傳入
-  str(message.channel.id)），轉交 context_manager.build() 與
-  memory_manager.save_message()，確保：
-    1. 「相關歷史訊息」與「最近對話」依目前頻道過濾
-    2. 新訊息存入 messages 表時帶上 channel_id
-  達成「依賴 channel_id 避免不同伺服器間串台」的目標
-
-新增（異常行為自動偵測）：
-- 封鎖檢查之後新增 core.ai.abuse_guard.check_and_record() 呼叫，
-  以滑動視窗偵測短時間內過量請求，超過門檻時自動施加暫時限制
-  （與 is_banned() 的永久封鎖區分，效期過後自動解除，不需 Owner 介入）
+- 驗證使用者狀態與 prompt 安全性。
+- 組裝 context 與 prompt，呼叫 Gemini / Gemma，處理 fallback 與結果儲存。
+- 透過 event_bus 觸發背景記憶任務，不在本檔直接操作底層資料庫。
 """
 
 from __future__ import annotations
@@ -40,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Sequence
 
 from google.genai import types
 from google.genai.errors import ClientError, ServerError
@@ -48,9 +28,10 @@ from core.ai.abuse_guard import check_and_record as check_abuse
 from core.ai.agent_router import route as make_route
 from core.ai.budget import record_error, record_usage
 from core.ai.context_manager import build as build_context
+from core.ai.file_parser.models import ParsedFile
 from core.ai.gemini_client import client
 from core.ai.memory_manager import save_message
-from core.ai.models import FALLBACK_MODEL, is_gemini
+from core.ai.models import FALLBACK_MODEL, MULTIMODAL_MODEL, is_gemini
 from core.ai.prompt_builder import build as build_prompt
 from core.ai.prompt_builder import get_system_prompt
 from core.ai.search_manager import check_cache, save_result
@@ -64,7 +45,7 @@ from utils.ai.prompt_guard import sanitize_prompt
 
 logger = logging.getLogger("bot.ai.core")
 
-# ── 常數 ──────────────────────────────────────────────────────────────
+# ── 常數 ──────────────────────
 
 TIMEOUT = 30
 RETRY   = 3
@@ -72,7 +53,9 @@ RETRY   = 3
 _BLOCKED   = object()   # 安全過濾器擋住
 _MALFORMED = object()   # MALFORMED_RESPONSE
 
-# ── 內部工具 ──────────────────────────────────────────────────────────
+ContentPayload = str | list[str | types.Part]
+
+# ── 內部工具 ──────────────────────
 
 def _parse_retry_after(error_str: str) -> float:
     m = re.search(r"retry in (\d+(?:\.\d+)?)s", error_str)
@@ -115,15 +98,27 @@ def _build_contents(
     model:         str,
     system_prompt: str,
     final_prompt:  str,
-) -> str:
-    """非 Gemini 模型將 system_prompt 拼入 contents 前段。"""
+    image_parts:   Sequence[types.Part] | None = None,
+) -> ContentPayload:
+    """
+    建立 generate_content 的 contents。
+
+    Gemini 可直接接收文字與 Part 列表；Gemma 不支援 system_instruction，
+    因此仍將 system_prompt 拼入文字內容。圖片 Part 只會在 Gemini 路徑使用。
+    """
     if is_gemini(model):
+        if image_parts:
+            return [final_prompt, *image_parts]
         return final_prompt
     return f"{system_prompt}\n\n{final_prompt}"
 
-# ── API 呼叫層 ────────────────────────────────────────────────────────
+# ── API 呼叫層 ──────────────────────
 
-async def _call(model: str, contents: str, config: types.GenerateContentConfig):
+async def _call(
+    model: str,
+    contents: ContentPayload,
+    config: types.GenerateContentConfig,
+):
     res = await asyncio.wait_for(
         client.aio.models.generate_content(
             model=model, contents=contents, config=config,
@@ -139,12 +134,13 @@ async def _try_generate(
     config:        types.GenerateContentConfig,
     user_id:       str,
     system_prompt: str,
+    image_parts:   Sequence[types.Part] | None = None,
     max_retries:   int = RETRY,
 ) -> str | object | None:
     """
     回傳：str → 成功 | _BLOCKED → 安全過濾 | _MALFORMED → 格式錯誤 | None → 可重試
     """
-    contents = _build_contents(model, system_prompt, prompt)
+    contents = _build_contents(model, system_prompt, prompt, image_parts)
 
     for attempt in range(max_retries):
         try:
@@ -217,9 +213,16 @@ async def _try_generate(
     )
     return None
 
-# ── 主入口 ────────────────────────────────────────────────────────────
+# ── 主入口 ──────────────────────
 
-async def generate(user, prompt: str, channel_id: str) -> str:
+async def generate(
+    user,
+    prompt: str,
+    channel_id: str = "",
+    *,
+    files: Sequence[ParsedFile] | None = None,
+    image_parts: Sequence[types.Part] | None = None,
+) -> str:
     user_id  = str(user.id)
     # getattr(..., None) or getattr(...) 在型別上會被 mypy 推導為
     # Any | None（無法保證一定是 str），用 str() 包一層確保型別明確，
@@ -229,18 +232,18 @@ async def generate(user, prompt: str, channel_id: str) -> str:
         getattr(user, "display_name", None) or getattr(user, "name", None) or user_id
     )
 
-    # ── 封鎖檢查 ───────────────────────────────────────────────
+    # ── 封鎖檢查 ──────────────────────
     if is_banned(user_id):
         logger.info("[blocked] user=%s", user_id)
         return "抱歉，我沒辦法回應你的提問。"
 
-    # ── 異常請求頻率檢查（自動暫時限制，非 Owner 手動封鎖）─────
+    # ── 異常請求頻率檢查（自動暫時限制，非 Owner 手動封鎖） ──────────────────────
     allowed, restrict_reason = check_abuse(user_id)
     if not allowed:
         logger.info("[abuse_guard] user=%s restricted: %s", user_id, restrict_reason)
         return restrict_reason or "請求過於頻繁，請稍後再試"
 
-    # ── Prompt 清理與注入偵測 ──────────────────────────────────
+    # ── Prompt 清理與注入偵測 ──────────────────────
     guard = sanitize_prompt(prompt)
     clean = guard.cleaned
 
@@ -252,7 +255,7 @@ async def generate(user, prompt: str, channel_id: str) -> str:
     if not clean:
         return "請輸入有效的內容"
 
-    # ── 社交資訊（log 用）──────────────────────────────────────
+    # ── 社交資訊（log 用） ──────────────────────
     user_info = get_user_info(user_id, username)
     logger.info(
         "[request] user=%s(%s) tier=%s interactions=%d",
@@ -261,10 +264,21 @@ async def generate(user, prompt: str, channel_id: str) -> str:
         user_info["interaction_count"],
     )
 
-    # ── 規則路由（模型 + 工具，無 AI 呼叫）───────────────────
+    parsed_files = list(files or [])
+    images       = list(image_parts or [])
+
+    # ── 規則路由（模型 + 工具，無 AI 呼叫） ──────────────────────
     decision = make_route(clean)
 
-    # ── 搜尋快取（命中則跳過 Grounding）──────────────────────
+    # ── 多模態路由保護 ──────────────────────
+    if images and not is_gemini(decision.model):
+        logger.info(
+            "[multimodal_route] user=%s model=%s -> %s images=%d",
+            user_id, decision.model, MULTIMODAL_MODEL, len(images),
+        )
+        decision.model = MULTIMODAL_MODEL
+
+    # ── 搜尋快取（命中則跳過 Grounding） ──────────────────────
     cached_search = None
     if decision.use_search:
         cached_search, still_need = check_cache(clean)
@@ -279,7 +293,7 @@ async def generate(user, prompt: str, channel_id: str) -> str:
         )
         decision.use_search = False
 
-    # ── Context 組裝 ───────────────────────────────────────────
+    # ── Context 組裝 ──────────────────────
     bundle = await build_context(
         user_id            = user_id,
         username           = username,
@@ -288,9 +302,10 @@ async def generate(user, prompt: str, channel_id: str) -> str:
         injection_detected = guard.injection_detected,
         route              = decision,
         cached_search      = cached_search,
+        files              = parsed_files,
     )
 
-    # ── Prompt 組裝 ───────────────────────────────────────────
+    # ── Prompt 組裝 ──────────────────────
     system_prompt = get_system_prompt()
     final_prompt  = build_prompt(bundle)
 
@@ -301,12 +316,13 @@ async def generate(user, prompt: str, channel_id: str) -> str:
         user_id, decision.model, decision.use_search, len(final_prompt),
     )
 
-    # ── API 呼叫 ───────────────────────────────────────────────
+    # ── API 呼叫 ──────────────────────
     result = await _try_generate(
         decision.model, final_prompt, config, user_id, system_prompt,
+        image_parts=images,
     )
 
-    # ── Fallback（max_retries=1 避免 quota 等待 × 3）──────────
+    # ── Fallback（max_retries=1 避免 quota 等待 × 3） ──────────────────────
     if result is None:
         logger.warning(
             "[fallback] user=%s %s → %s",
@@ -319,10 +335,11 @@ async def generate(user, prompt: str, channel_id: str) -> str:
             _build_config(FALLBACK_MODEL, False, fb_sys),
             user_id,
             fb_sys,
+            image_parts=images if is_gemini(FALLBACK_MODEL) else None,
             max_retries=1,
         )
 
-    # ── Sentinel 處理 ──────────────────────────────────────────
+    # ── Sentinel 處理 ──────────────────────
     if result is _MALFORMED:
         return "模型回應格式異常，請改用 用flash 或 用gemini 再試"
 
@@ -347,16 +364,16 @@ async def generate(user, prompt: str, channel_id: str) -> str:
         user_id, decision.model, len(text),
     )
 
-    # ── Grounding 結果回填快取 ─────────────────────────────────
+    # ── Grounding 結果回填快取 ──────────────────────
     if decision.use_search and text:
         save_result(clean, text[:800])
 
-    # ── 儲存對話歷史 ──────────────────────────────────────────
+    # ── 儲存對話歷史 ──────────────────────
     save_message(user_id, "user",      clean,         channel_id)
     save_message(user_id, "assistant", text[:2_000], channel_id)
     increment_interaction(user_id)
 
-    # ── 觸發背景任務（透過 event_bus）────────────────────────
+    # ── 觸發背景任務（透過 event_bus） ──────────────────────
     await event_bus.emit(
         "message_generated",
         user_id  = user_id,

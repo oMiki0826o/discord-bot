@@ -1,6 +1,9 @@
 """
 core/ai/file_parser/text_parser.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 修正（純文字解析）：
 - 涵蓋 txt / md / log / csv / tsv / json / jsonl / yaml / toml / ini / env
 - 編碼偵測：優先 UTF-8，失敗後嘗試 chardet，再退 latin-1 保底
@@ -20,12 +23,12 @@ from core.ai.file_parser.encoding import decode_bytes
 
 logger = logging.getLogger("bot.file_parser.text")
 
-# ── 大型 CSV / JSONL 最大列數 ──────────────────────────────────────────
+# ── 大型 CSV / JSONL 最大列數 ──────────────────────
 _MAX_CSV_ROWS  = 500
 _MAX_JSONL_OBJ = 50
 
 
-# ── 主要入口 ─────────────────────────────────────────────────────────────
+# ── 主要入口 ──────────────────────
 
 def parse(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     """解析純文字類檔案，回傳 ParsedFile。"""
@@ -47,7 +50,7 @@ def parse(path: Path, filename: str, size_bytes: int) -> ParsedFile:
         )
 
 
-# ── 一般純文字 ───────────────────────────────────────────────────────────
+# ── 一般純文字 ──────────────────────
 
 def _parse_plain(
     path: Path, filename: str, ext: str, size_bytes: int,
@@ -62,7 +65,7 @@ def _parse_plain(
     )
 
 
-# ── CSV / TSV ────────────────────────────────────────────────────────────
+# ── CSV / TSV ──────────────────────
 
 def _parse_csv(
     path: Path, filename: str, ext: str, size_bytes: int,
@@ -76,7 +79,7 @@ def _parse_csv(
     header  = lines[0] if lines else ""
     total   = len(lines) - 1   # 扣掉標題行
 
-    # ── 限制列數，避免 OOM ──────────────────────────────
+    # ── 限制列數，避免 OOM ──────────────────────
     sample_lines = lines[: _MAX_CSV_ROWS + 1]   # 含標題
     truncated    = total > _MAX_CSV_ROWS
 
@@ -99,7 +102,7 @@ def _parse_csv(
     )
 
 
-# ── JSON ─────────────────────────────────────────────────────────────────
+# ── JSON ──────────────────────
 
 def _parse_json(
     path: Path, filename: str, size_bytes: int,
@@ -145,7 +148,7 @@ def _json_summary(obj: object, depth: int = 0, max_depth: int = 3) -> str:
     return repr(obj)
 
 
-# ── JSONL ────────────────────────────────────────────────────────────────
+# ── JSONL ──────────────────────
 
 def _parse_jsonl(
     path: Path, filename: str, size_bytes: int,

@@ -1,6 +1,9 @@
 """
 tests/test_budget.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 測試 core.ai.budget：
 - _estimate() 字元數估算公式
 - _extract_tokens() 對「有 / 無 usage_metadata」兩種情況的判斷
@@ -17,7 +20,7 @@ from types import SimpleNamespace
 
 import core.ai.budget as budget
 
-# ── 估算公式 ──────────────────────────────────────────────────────────
+# ── 估算公式 ──────────────────────
 
 def test_estimate_uses_three_chars_per_token():
     assert budget._estimate("abc") == 1          # 3 字元 → 1 token
@@ -48,7 +51,7 @@ def test_extract_tokens_falls_back_when_fields_missing():
     assert estimated is True
 
 
-# ── record_usage / 統計查詢 ───────────────────────────────────────────
+# ── record_usage / 統計查詢 ──────────────────────
 
 def test_record_usage_with_real_usage_metadata_is_not_estimated(fresh_db):
     res = SimpleNamespace(

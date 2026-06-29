@@ -1,6 +1,9 @@
 """
 cogs/system/monitor.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 職責：
 - 週期性背景任務：定期檢查過去 1 小時的錯誤率，超過閾值時主動通知 Owner
 

@@ -1,6 +1,9 @@
 """
 tests/test_memory_manager.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 測試範圍刻意限制在「不會呼叫 Gemini API」的部分：
 - core.ai.memory_manager.save_message / search / get_recent
   （這幾個函式只包裝 repository 的純 SQL 查詢與 ranker 排序邏輯，
@@ -18,7 +21,7 @@ from __future__ import annotations
 import core.ai.memory_manager as memory_manager
 import database.repository.memory_repository as mem_repo
 
-# ── channel_id 隔離（核心新功能的回歸測試）──────────────────────────
+# ── channel_id 隔離（核心新功能的回歸測試） ──────────────────────
 
 def test_get_recent_filters_by_channel(fresh_db):
     memory_manager.save_message("u1", "user", "頻道A的話", "channelA")
@@ -72,7 +75,7 @@ def test_count_messages_is_not_channel_filtered(fresh_db):
     assert mem_repo.count_messages("u1") == 2
 
 
-# ── load_background() 格式解析（修正 lstrip/rstrip 同類問題後的回歸測試）──
+# ── load_background() 格式解析（修正 lstrip/rstrip 同類問題後的回歸測試） ──────────────────────
 
 def test_load_background_parses_section_headers(tmp_path, monkeypatch):
     content = (

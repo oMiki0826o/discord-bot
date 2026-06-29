@@ -1,6 +1,9 @@
 """
 tests/test_json_utils.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 測試 core.ai.json_utils.strip_json_fence()。
 
 重點覆蓋原本的 bug：

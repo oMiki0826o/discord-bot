@@ -1,16 +1,15 @@
 """
 cogs/ai/chat.py
 
-修正（整合附件解析）：
-- on_message 新增附件處理：偵測 message.attachments，依副檔名分流
-  - 圖片（IMAGE_EXTENSIONS）：直接讀取 bytes 組成 Gemini types.Part，
-    不經過 file_parser（Gemini 系列本身即多模態模型，省去 OCR/Vision）
-  - 其他副檔名：寫入暫存檔後呼叫 file_parser.parse()，取得 ParsedFile，
-    暫存檔案於 finally 區塊保證刪除，避免磁碟堆積
-  - 附件數量上限 MAX_ATTACHMENTS，防止單則訊息夾帶過多檔案拖慢回應
-  - 單一附件處理失敗只記錄 log，不中斷整體流程（呼應 file_parser 設計原則）
-- handle_ai() 新增 files / image_parts 參數，轉交 generate()
-- 其餘職責不變：監聽 on_message、管理冷卻與請求鎖定、長回覆轉 .txt 附件
+Modification():
+- 監聽 mention 訊息，整理 prompt、冷卻、鎖定與回覆送出。
+- 附件會分流為 file_parser 解析結果或 Gemini 圖片 Part。
+- generate() 呼叫改用明確關鍵字傳入 channel_id、files 與 image_parts。
+- 單一附件處理失敗只記錄 log，不中斷整體對話流程。
+
+職責：
+- 作為 Discord 訊息事件與 core.ai.generate() 之間的薄入口。
+- 不在 Cog 內組 Prompt 或直接呼叫 Gemini。
 """
 
 import asyncio
@@ -32,7 +31,7 @@ from core.ai.file_parser.constants import IMAGE_EXTENSIONS, MAX_IMAGE_SIZE
 
 logger = logging.getLogger("bot.ai.chat")
 
-# ── 全域狀態 ──────────────────────────────────────────────────────────
+# ── 全域狀態 ──────────────────────
 # Bot 重啟後自動清空，不需要持久化
 
 user_locks:    dict[int, bool]  = {}
@@ -50,14 +49,14 @@ _IMAGE_MIME: dict[str, str] = {
     ".gif":  "image/gif",
 }
 
-# ── Cog ──────────────────────────────────────────────────────────────
+# ── Cog ──────────────────────
 
 class Chat(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    # ── 清理 Mention ────────────────────────────────────────────────
+    # ── 清理 Mention ──────────────────────
 
     def parse_prompt(self, content: str) -> str:
         """
@@ -71,7 +70,7 @@ class Chat(commands.Cog):
             .strip()
         )
 
-    # ── Cooldown 檢查 ────────────────────────────────────────────────
+    # ── Cooldown 檢查 ──────────────────────
 
     def check_cooldown(self, user_id: int) -> bool:
         """
@@ -86,7 +85,7 @@ class Chat(commands.Cog):
         user_cooldown[user_id] = now
         return True
 
-    # ── 附件處理 ─────────────────────────────────────────────────────
+    # ── 附件處理 ──────────────────────
 
     async def process_attachments(
         self,
@@ -157,7 +156,7 @@ class Chat(commands.Cog):
         finally:
             tmp_path.unlink(missing_ok=True)
 
-    # ── 送出回覆 ─────────────────────────────────────────────────────
+    # ── 送出回覆 ──────────────────────
 
     async def send_response(
         self,
@@ -179,7 +178,7 @@ class Chat(commands.Cog):
             await self._safe_edit(thinking, text)
             return
 
-        # ── 長回覆：轉成 txt 附件 ──────────────────────────────
+        # ── 長回覆：轉成 txt 附件 ──────────────────────
         try:
             await thinking.delete()
         except discord.HTTPException:
@@ -205,7 +204,7 @@ class Chat(commands.Cog):
                 return
             raise
 
-    # ── AI 主流程 ─────────────────────────────────────────────────────
+    # ── AI 主流程 ──────────────────────
 
     async def handle_ai(
         self,
@@ -222,27 +221,30 @@ class Chat(commands.Cog):
         """
         user_id = message.author.id
 
-        # ── 冷卻檢查 ───────────────────────────────────────────
+        # ── 冷卻檢查 ──────────────────────
         if not self.check_cooldown(user_id):
             await message.reply(f"請稍等 {float(_s('ai.cooldown_seconds', 3.0))} 秒再試")
             return
 
-        # ── 鎖定檢查（防止並發請求）───────────────────────────
+        # ── 鎖定檢查（防止並發請求） ──────────────────────
         if user_locks.get(user_id):
             await message.reply("正在處理上一個請求，請稍後")
             return
 
         user_locks[user_id] = True
 
-        # ── 附件解析（鎖定後才處理，避免並發請求重複下載）────
+        # ── 附件解析（鎖定後才處理，避免並發請求重複下載） ──────────────────────
         files, image_parts = await self.process_attachments(message.attachments)
 
         thinking = await message.reply("思考中...")
 
         try:
             text = await generate(
-                message.author, prompt,
-                files=files, image_parts=image_parts,
+                user=message.author,
+                prompt=prompt,
+                channel_id=str(message.channel.id),
+                files=files,
+                image_parts=image_parts,
             )
             await self.send_response(thinking, text, original=message)
 
@@ -256,7 +258,7 @@ class Chat(commands.Cog):
             # 無論成功或失敗都要解鎖，否則使用者永久無法再發請求
             user_locks[user_id] = False
 
-    # ── 事件入口 ──────────────────────────────────────────────────────
+    # ── 事件入口 ──────────────────────
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:

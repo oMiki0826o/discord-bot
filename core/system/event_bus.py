@@ -1,6 +1,9 @@
 """
 core/system/event_bus.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 職責：
 - 輕量 pub/sub 事件系統，取代 core.py 中散落的 asyncio.create_task()
 - Handler 以 create_task 方式執行，不阻塞發佈者
@@ -26,12 +29,12 @@ from typing import Any, Callable, Coroutine
 
 logger = logging.getLogger("bot.system.event_bus")
 
-# ── 全域 handler 表 ───────────────────────────────────────────────────
+# ── 全域 handler 表 ──────────────────────
 
 _handlers: dict[str, list[Callable[..., Coroutine]]] = defaultdict(list)
 _background_tasks: set[asyncio.Task] = set()
 
-# ── 公開 API ──────────────────────────────────────────────────────────
+# ── 公開 API ──────────────────────
 
 def on(event: str, handler: Callable[..., Coroutine]) -> None:
     """

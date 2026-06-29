@@ -1,6 +1,9 @@
 """
 core/ai/file_parser/archive_parser.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 修正（Manifest 模式，安全第一）：
 - 預設只列出清單，絕對不自動解壓縮，防止 Zip Bomb 與路徑穿越攻擊
 - 支援 zip / tar（含 .tar.gz / .tar.bz2 / .tar.xz）/ 7z（需 py7zr 套件）
@@ -30,7 +33,7 @@ from core.ai.file_parser.summary_builder import truncate
 logger = logging.getLogger("bot.file_parser.archive")
 
 
-# ── 主要入口 ─────────────────────────────────────────────────────────────
+# ── 主要入口 ──────────────────────
 
 def parse(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     """
@@ -49,26 +52,26 @@ def parse(path: Path, filename: str, size_bytes: int) -> ParsedFile:
         )
 
 
-# ── 格式分派 ─────────────────────────────────────────────────────────────
+# ── 格式分派 ──────────────────────
 
 def _dispatch(path: Path, filename: str, ext: str, size_bytes: int) -> ParsedFile:
-    # ── ZIP ──────────────────────────────────────────────────
+    # ── ZIP ──────────────────────
     if ext == ".zip" or zipfile.is_zipfile(path):
         return _manifest_zip(path, filename, ext, size_bytes)
 
-    # ── TAR（含 .tar.gz / .tar.bz2 / .tar.xz / .tgz / .tbz2 / .txz）──
+    # ── TAR（含 .tar.gz / .tar.bz2 / .tar.xz / .tgz / .tbz2 / .txz） ──────────────────────
     if tarfile.is_tarfile(str(path)):
         return _manifest_tar(path, filename, ext, size_bytes)
 
-    # ── 單一壓縮檔（.gz / .bz2 / .xz）─────────────────────
+    # ── 單一壓縮檔（.gz / .bz2 / .xz） ──────────────────────
     if ext in {".gz", ".bz2", ".xz"}:
         return _single_compressed(path, filename, ext, size_bytes)
 
-    # ── 7Z ───────────────────────────────────────────────────
+    # ── 7Z ──────────────────────
     if ext == ".7z":
         return _manifest_7z(path, filename, size_bytes)
 
-    # ── RAR ──────────────────────────────────────────────────
+    # ── RAR ──────────────────────
     if ext == ".rar":
         return _manifest_rar(path, filename, size_bytes)
 
@@ -79,7 +82,7 @@ def _dispatch(path: Path, filename: str, ext: str, size_bytes: int) -> ParsedFil
     )
 
 
-# ── 共用：將項目列表轉為 Manifest 文字 ───────────────────────────────────
+# ── 共用：將項目列表轉為 Manifest 文字 ──────────────────────
 
 def _build_manifest(
     entries:    list[tuple[str, int]],   # [(name, compressed_size), ...]
@@ -97,7 +100,7 @@ def _build_manifest(
     truncated = total > MAX_ARCHIVE_ENTRIES
     shown     = entries[:MAX_ARCHIVE_ENTRIES]
 
-    # ── 副檔名分布統計 ─────────────────────────────────────
+    # ── 副檔名分布統計 ──────────────────────
     ext_counter: Counter[str] = Counter()
     total_size = 0
     for name, csz in entries:
@@ -110,7 +113,7 @@ def _build_manifest(
         f"{e}×{c}" for e, c in ext_counter.most_common(10)
     )
 
-    # ── 組裝文字 ───────────────────────────────────────────
+    # ── 組裝文字 ──────────────────────
     header = (
         f"[格式：{fmt}  共 {total} 個項目"
         + (f"  壓縮大小合計：{total_size // 1024}KB" if total_size else "")
@@ -132,7 +135,7 @@ def _build_manifest(
     )
 
 
-# ── ZIP ──────────────────────────────────────────────────────────────────
+# ── ZIP ──────────────────────
 
 def _manifest_zip(
     path: Path, filename: str, ext: str, size_bytes: int,
@@ -145,7 +148,7 @@ def _manifest_zip(
     return _build_manifest(entries, filename, ext, size_bytes, "ZIP")
 
 
-# ── TAR（含 gz / bz2 / xz）──────────────────────────────────────────────
+# ── TAR（含 gz / bz2 / xz） ──────────────────────
 
 def _manifest_tar(
     path: Path, filename: str, ext: str, size_bytes: int,
@@ -162,7 +165,7 @@ def _manifest_tar(
     return _build_manifest(entries, filename, ext, size_bytes, fmt)
 
 
-# ── 單一壓縮檔（不含 tar 封裝的 .gz / .bz2 / .xz）─────────────────────
+# ── 單一壓縮檔（不含 tar 封裝的 .gz / .bz2 / .xz） ──────────────────────
 
 def _single_compressed(
     path: Path, filename: str, ext: str, size_bytes: int,
@@ -184,7 +187,7 @@ def _single_compressed(
     )
 
 
-# ── 7Z ───────────────────────────────────────────────────────────────────
+# ── 7Z ──────────────────────
 
 def _manifest_7z(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     try:
@@ -202,7 +205,7 @@ def _manifest_7z(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     return _build_manifest(entries, filename, ".7z", size_bytes, "7Z")
 
 
-# ── RAR ──────────────────────────────────────────────────────────────────
+# ── RAR ──────────────────────
 
 def _manifest_rar(path: Path, filename: str, size_bytes: int) -> ParsedFile:
     try:

@@ -1,6 +1,9 @@
 """
 core/ai/file_parser/models.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 修正（統一資料模型）：
 - 所有 parser 不論處理何種格式，皆回傳 ParsedFile
 - 禁止不同格式回傳不同資料結構
@@ -12,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-# ── 解析結果統一模型 ─────────────────────────────────────────────────────
+# ── 解析結果統一模型 ──────────────────────
 
 @dataclass
 class ParsedFile:
@@ -21,18 +24,18 @@ class ParsedFile:
     呼叫端只需檢查 error 是否為 None 即可判斷成功。
     """
 
-    # ── 基本資訊 ───────────────────────────────────────────
+    # ── 基本資訊 ──────────────────────
     filename:   str            # 原始檔名（含副檔名）
     extension:  str            # 副檔名，小寫，如 ".py"
     category:   str            # 分類：text / code / document / unknown
     size_bytes: int            # 原始檔案大小（bytes）
 
-    # ── 解析結果 ───────────────────────────────────────────
+    # ── 解析結果 ──────────────────────
     content:   str  = ""       # 提取出的純文字內容
     truncated: bool = False    # True 表示因過大而被截斷
     error:     str | None = None  # None = 成功；字串 = 失敗原因
 
-    # ── 程式碼專用（code_parser 填充，其餘 parser 留空）────
+    # ── 程式碼專用（code_parser 填充，其餘 parser 留空） ──────────────────────
     language:  str             = ""
     imports:   list[str]       = field(default_factory=list)
     classes:   list[str]       = field(default_factory=list)

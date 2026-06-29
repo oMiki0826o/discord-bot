@@ -1,6 +1,9 @@
 """
 tests/test_tool_registry.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 測試 core.ai.tool_registry.select_tools()：純規則判斷，
 不呼叫任何 executor（executor 涉及 DB / Gemini Client，
 此處只驗證「該不該啟用某個工具」的判斷邏輯）。

@@ -1,6 +1,9 @@
 """
 core/ai/search_manager.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 職責：
 - 搜尋快取：命中時跳過 Grounding，節省 Token
 - 統一入口：check_cache() 回傳 (快取結果, 是否仍需搜尋)
@@ -36,7 +39,7 @@ from database.ai.sqlite import get_connection
 
 logger = logging.getLogger("bot.search_manager")
 
-# ── 常數 ──────────────────────────────────────────────────────────────
+# ── 常數 ──────────────────────
 
 _SHORT_TTL_KEYWORDS = (
     "天氣", "股價", "匯率", "即時", "最新", "現在", "今天",
@@ -46,7 +49,7 @@ _SHORT_TTL_MIN  = int(_s('ai.search_short_ttl_min', 30))
 _LONG_TTL_MIN   = int(_s('ai.search_long_ttl_min', 1440))
 _FUZZY_THR      = float(_s('ai.search_fuzzy_threshold', 0.85))
 
-# ── DB 初始化 ──────────────────────────────────────────────────────────
+# ── DB 初始化 ──────────────────────
 
 def _init() -> None:
     conn = get_connection()
@@ -68,7 +71,7 @@ def _init() -> None:
 
 _init()
 
-# ── 工具 ──────────────────────────────────────────────────────────────
+# ── 工具 ──────────────────────
 
 def _hash(query: str) -> str:
     return hashlib.md5(query.lower().strip().encode()).hexdigest()
@@ -78,7 +81,7 @@ def _ttl(query: str) -> int:
     q = query.lower()
     return _SHORT_TTL_MIN if any(k in q for k in _SHORT_TTL_KEYWORDS) else _LONG_TTL_MIN
 
-# ── 快取 ──────────────────────────────────────────────────────────────
+# ── 快取 ──────────────────────
 
 def check_cache(query: str) -> tuple[str | None, bool]:
     """
@@ -90,7 +93,7 @@ def check_cache(query: str) -> tuple[str | None, bool]:
     conn = get_connection()
     c    = conn.cursor()
 
-    # ── 精確命中 ───────────────────────────────────────────────
+    # ── 精確命中 ──────────────────────
     c.execute(
         "SELECT result FROM search_cache WHERE query_hash=? AND expires_at>?",
         (_hash(query), now),
@@ -101,7 +104,7 @@ def check_cache(query: str) -> tuple[str | None, bool]:
         logger.debug("[search_manager] cache exact: %r", query[:50])
         return row["result"], False
 
-    # ── 模糊命中 ───────────────────────────────────────────────
+    # ── 模糊命中 ──────────────────────
     c.execute(
         "SELECT query_text, result FROM search_cache WHERE expires_at>?", (now,),
     )

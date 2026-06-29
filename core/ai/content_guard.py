@@ -1,6 +1,9 @@
 """
 core/ai/content_guard.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 職責：
 - 讀取 Owner 自訂的內容審核規則檔（database/ai/moderation_rules.txt）
 - 提供 moderation_to_prompt()，將規則以自然語言形式注入 system prompt
@@ -40,12 +43,12 @@ _RULES_FILE = (
     Path(__file__).resolve().parents[2] / "database" / "ai" / "moderation_rules.txt"
 )
 
-# ── 快取狀態 ──────────────────────────────────────────────────────────
+# ── 快取狀態 ──────────────────────
 
 _cached_content:  str = ""
 _cached_mtime:    float = -1.0
 
-# ── 內部工具 ──────────────────────────────────────────────────────────
+# ── 內部工具 ──────────────────────
 
 def _reload_if_changed() -> str:
     """檢查檔案 mtime，變動時重新讀取，否則回傳快取內容。"""
@@ -67,7 +70,7 @@ def _reload_if_changed() -> str:
 
     try:
         text = _RULES_FILE.read_text(encoding="utf-8")
-        # ── 過濾 "#" 開頭的註解行，讓 Owner 可在檔案中寫使用說明 ──
+        # ── 過濾 "#" 開頭的註解行，讓 Owner 可在檔案中寫使用說明 ──────────────────────
         kept = [
             line for line in text.splitlines()
             if not line.strip().startswith("#")
@@ -83,7 +86,7 @@ def _reload_if_changed() -> str:
 
     return _cached_content
 
-# ── 對外入口 ──────────────────────────────────────────────────────────
+# ── 對外入口 ──────────────────────
 
 def get_rules_text() -> str:
     """取得目前的審核規則原文（供 $dashboard 等指令顯示用）。"""

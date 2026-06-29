@@ -1,6 +1,9 @@
 """
 core/ai/memory_manager.py
 
+Modification():
+- 統一檔案註解格式，保留原有職責說明。
+
 職責：
 - 統一管理所有記憶操作：訊息、長期記憶、向量記憶、摘要
 - 提供 search() 供 context_manager 一次取得所有記憶來源
@@ -63,7 +66,7 @@ from core.system import event_bus
 
 logger = logging.getLogger("bot.memory_manager")
 
-# ── 常數 ──────────────────────────────────────────────────────────────
+# ── 常數 ──────────────────────
 
 _EXTRACT_MODEL   = MODELS["lite"]
 _EMBED_MODEL     = EMBED_MODEL
@@ -86,12 +89,12 @@ _SUMMARY_SYSTEM = (
     "排除：閒聊、打招呼、重複內容。只輸出摘要文字，不加任何標題或說明。"
 )
 
-# ── 簡易記憶快取（TTL 由 settings.json 統一管理）────────────────────────
+# ── 簡易記憶快取（TTL 由 settings.json 統一管理） ──────────────────────
 
 _search_cache: dict[str, tuple[float, MemoryBundle]] = {}
 _CACHE_TTL = float(_s('ai.memory_cache_ttl', 5.0))
 
-# ── 儲存入口 ──────────────────────────────────────────────────────────
+# ── 儲存入口 ──────────────────────
 
 def save_message(user_id: str, role: str, content: str, channel_id: str = "") -> None:
     repo.insert_message(user_id, role, content, channel_id)
@@ -103,7 +106,7 @@ def save_memory(user_id: str, keyword: str, content: str, importance: int = 1) -
         return
     repo.upsert_memory(user_id, keyword, content, importance)
 
-# ── 搜尋入口 ──────────────────────────────────────────────────────────
+# ── 搜尋入口 ──────────────────────
 
 class MemoryBundle:
     """search() 的回傳結果，封裝所有記憶來源。"""
@@ -180,7 +183,7 @@ def get_recent(user_id: str, channel_id: str, limit: int = 12) -> list[tuple[str
 def get_summary_text(user_id: str) -> str:
     return repo.get_summary(user_id)
 
-# ── 向量搜尋 ──────────────────────────────────────────────────────────
+# ── 向量搜尋 ──────────────────────
 
 async def search_semantic(
     user_id:   str,
@@ -203,7 +206,7 @@ async def search_semantic(
     scored.sort(reverse=True, key=lambda x: x[0])
     return [(kw, c, imp, sim) for sim, kw, c, imp in scored[:limit]]
 
-# ── 背景任務 ──────────────────────────────────────────────────────────
+# ── 背景任務 ──────────────────────
 
 async def _on_message_generated(
     user_id: str,
@@ -330,7 +333,7 @@ async def force_summarize(user_id: str) -> str:
         logger.debug("[memory_manager] force_summarize error: %s", e)
         return ""
 
-# ── 數學工具 ──────────────────────────────────────────────────────────
+# ── 數學工具 ──────────────────────
 
 def _cosine(a: list[float], b: list[float]) -> float:
     if len(a) != len(b):
@@ -359,6 +362,6 @@ async def _embed(text: str) -> list[float] | None:
         logger.debug("[memory_manager] embed error: %s", e)
     return None
 
-# ── 事件注冊 ──────────────────────────────────────────────────────────
+# ── 事件注冊 ──────────────────────
 
 event_bus.on("message_generated", _on_message_generated)
