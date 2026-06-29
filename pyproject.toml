@@ -1,0 +1,62 @@
+# pyproject.toml
+#
+# 集中設定測試與靜態檢查工具，取代散落的 pytest.ini / ruff.toml / mypy.ini。
+#
+# 使用方式：
+#   pytest                 — 執行 tests/ 下所有測試
+#   ruff check .           — 靜態檢查（未使用 import、明顯錯誤等）
+#   mypy .                 — 型別檢查（寬鬆模式，見下方說明）
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts   = "-ra -q"
+
+[tool.ruff]
+line-length    = 100
+target-version = "py312"
+# 與 database/ai/memory.db 等執行期產物一致，不檢查這些路徑
+exclude = ["__pycache__", ".venv", "venv", "database/logs"]
+
+[tool.ruff.lint]
+# 初期僅啟用基本規則集，避免一次性導入大量現有檔案的格式調整：
+# E/W  — pycodestyle（基本風格錯誤）
+# F    — pyflakes（未使用的 import / 變數，本次優化移除大量死碼即屬此類）
+# I    — isort（import 排序）
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",  # 行長度由 black/個人風格決定，不在此強制
+]
+
+[tool.mypy]
+python_version          = "3.12"
+# 寬鬆模式：專案大量使用 from __future__ import annotations 但尚未
+# 全面補上型別標註，先檢查「已標註的部分是否正確」，避免一次要求
+# 全面型別覆蓋造成導入阻力；之後可逐步拿掉以下寬鬆設定，收緊規則。
+check_untyped_defs      = true
+disallow_untyped_defs   = false
+ignore_missing_imports  = true
+warn_unused_ignores     = true
+warn_redundant_casts    = true
+exclude                 = "tests/"
+
+# cogs/ 底下刻意不放 __init__.py（沿用 extension_loader.py 以
+# os.walk 動態掃描載入 cog 的設計，不依賴 Python 套件機制），
+# 但這會讓 mypy 預設的模組解析無法區分同名檔案
+# （例如 cogs/ai/info.py 與 cogs/other/info.py 都叫 info.py）。
+# explicit_package_bases 改為以「檔案路徑」而非「檔名」決定模組身分，
+# 解決此衝突，且不需要新增任何 __init__.py。
+explicit_package_bases  = true
+mypy_path               = "."
+
+# ── discord.py .error 裝飾器堆疊：已知 stub 限制，非實際型別錯誤 ──
+# cogs/ai/info.py、cogs/ai/dashboard.py 使用標準 discord.py 慣例：
+# 將多個 @xxx.error 裝飾器疊在同一個共用錯誤處理函式上，讓多個指令
+# 共用一套錯誤回應邏輯。discord.py 的型別 stub 對 Command.error 的
+# overload 在「同一函式被多個不同簽名的 Command 同時當作 error
+# handler」時會解析失敗（每個 Command 的 ctx/參數簽名不同，stub
+# 期待單一精確匹配），屬於 stub 本身的已知限制，程式碼在執行期
+# 行為完全正確（discord.py 在執行期才呼叫 handler，不檢查簽名）。
+# 範圍限定在這兩個檔案，不放寬到其他模組。
+[[tool.mypy.overrides]]
+module = ["cogs.ai.info", "cogs.ai.dashboard"]
+disable_error_code = ["arg-type"]

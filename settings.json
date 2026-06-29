@@ -1,0 +1,100 @@
+{
+  "_comment": "firefly-bot 統一設定檔。修改後下次請求即自動生效，無需重啟。",
+  "_secret_note": "機密設定（Token、API Key）請存放在 .env，不要放在此檔案。",
+  "bot": {
+    "_comment": "Discord Bot 基本行為設定。status_type 支援: playing/listening/watching/competing/custom",
+    "command_prefix": "$",
+    "status_type": "playing",
+    "status_text": "薩姆戰甲",
+    "presence": "online",
+    "startup_timeout": 60
+  },
+  "ai": {
+    "_comment": "AI 對話系統設定",
+    "default_model": "gemma",
+    "cooldown_seconds": 3.0,
+    "max_reply_length": 1500,
+    "persona_name": "流螢",
+    "persona_source": "崩壞：星穹鐵道",
+    "social_tier_names": {
+      "0": "陌生人",
+      "1": "路人",
+      "2": "朋友",
+      "3": "開拓者"
+    },
+    "social_tier_descriptions": {
+      "0": "禮貌但保持距離，不主動親近",
+      "1": "友善平和，偶爾輕鬆",
+      "2": "溫暖自然，可以開玩笑、撒嬌",
+      "3": "完全卸下防備，最親密的關係，稱呼為「開拓者」"
+    },
+    "conversation_state_labels": {
+      "normal": "一般對話",
+      "roleplay": "角色扮演",
+      "creative": "創意寫作",
+      "task": "任務模式",
+      "debate": "辯論模式"
+    },
+    "summary_trigger": 40,
+    "summary_keep": 10,
+    "memory_cache_ttl": 5.0,
+    "abuse_window_seconds": 60,
+    "abuse_max_requests": 15,
+    "abuse_restrict_minutes": 10,
+    "search_short_ttl_min": 30,
+    "search_long_ttl_min": 1440,
+    "search_fuzzy_threshold": 0.85,
+    "alert_error_rate_threshold": 0.15,
+    "alert_check_interval_seconds": 300
+  },
+  "music": {
+    "_comment": "音樂播放系統設定",
+    "max_queue_size": 200,
+    "idle_timeout_seconds": 180,
+    "default_volume_percent": 50,
+    "ffmpeg_path": "ffmpeg",
+    "embed_colors": {
+      "playing": "blurple",
+      "queued": "orange",
+      "success": "green",
+      "error": "red",
+      "info": "blue"
+    },
+    "loop_labels": {
+      "off": "循環：關閉",
+      "single": "循環：單首",
+      "queue": "循環：佇列"
+    }
+  },
+  "ticket": {
+    "_comment": "工單系統設定",
+    "channel_prefix": "ticket-",
+    "category_name": "工單",
+    "archive_category": "",
+    "cooldown_seconds": 300,
+    "max_per_user": 1,
+    "support_dm_on_warn": true
+  },
+  "voice_channel": {
+    "_comment": "JTC 臨時語音頻道設定",
+    "default_name_template": "{username} 的頻道",
+    "default_limit": 0
+  },
+  "guild": {
+    "_comment": "伺服器事件訊息範本，{user}=mention, {username}=文字名稱, {guild}=伺服器名, {count}=人數",
+    "welcome_template": "歡迎 {user} 加入 **{guild}**！目前共有 {count} 名成員。",
+    "leave_template": "**{username}** 離開了 **{guild}**，目前剩 {count} 名成員。"
+  },
+  "moderation": {
+    "_comment": "管理功能設定",
+    "default_mute_minutes": 10,
+    "max_mute_minutes": 43200,
+    "dm_target_on_warn": true,
+    "dm_target_on_mute": false
+  },
+  "embed_footer": {
+    "_comment": "全局 Embed 頁腳文字",
+    "default": "Firefly Bot",
+    "music": "音樂系統"
+  }
+}

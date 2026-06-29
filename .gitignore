@@ -1,0 +1,23 @@
+# ── 環境變數 ──────────────────────
+.env
+
+# ── Python ──────────────────────
+__pycache__/
+*.pyc
+.venv/
+
+# ── 測試與靜態檢查快取（pyproject.toml: pytest / ruff / mypy）──────────────────────
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ── 執行期 Log（core/logging/constants.py: LOG_BASE_DIR = database/logs）──────────────────────
+database/logs/
+*.log
+
+# ── 執行期資料庫與設定（database/ai/sqlite.py: memory.db）──────────────────────
+database/ai/*.db
+database/prompts/active.txt
+
+# ── macOS ──────────────────────
+.DS_Store

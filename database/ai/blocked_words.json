@@ -1,0 +1,25 @@
+{
+  "_comment": "內容過濾設定。所有設定修改後即時生效，無需重啟。",
+  "_note": "blocked_words 比對為不分大小寫的子字串匹配；regex_patterns 為正規表達式。",
+
+  "blocked_words": [
+    "範例禁詞A",
+    "範例禁詞B"
+  ],
+
+  "blocked_regex_patterns": [
+  ],
+
+  "warn_words": [
+    "範例警告詞"
+  ],
+
+  "whitelist_users": [
+  ],
+
+  "auto_delete_on_trigger": false,
+
+  "log_trigger_to_channel": true,
+
+  "response_on_block": "此訊息包含不允許的內容，已被過濾。"
+}
