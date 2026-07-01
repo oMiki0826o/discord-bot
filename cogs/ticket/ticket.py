@@ -237,7 +237,9 @@ async def _close_ticket(interaction: discord.Interaction) -> None:
     由按鈕回呼或 /ticket close 呼叫。
     """
     channel = interaction.channel
-    assert isinstance(channel, discord.TextChannel)
+    if not isinstance(channel, discord.TextChannel):
+        await interaction.response.send_message("此指令僅限文字頻道使用", ephemeral=True)
+        return
 
     ticket = ticket_repo.get_ticket_by_channel(channel.id)
     if not ticket:
@@ -335,7 +337,9 @@ class Ticket(commands.Cog):
         member:      discord.Member,
     ) -> None:
         channel = interaction.channel
-        assert isinstance(channel, discord.TextChannel)
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("此指令僅限文字頻道使用", ephemeral=True)
+            return
 
         if not ticket_repo.get_ticket_by_channel(channel.id):
             await interaction.response.send_message("此頻道不是工單頻道", ephemeral=True)
@@ -368,7 +372,9 @@ class Ticket(commands.Cog):
         member:      discord.Member,
     ) -> None:
         channel = interaction.channel
-        assert isinstance(channel, discord.TextChannel)
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("此指令僅限文字頻道使用", ephemeral=True)
+            return
 
         if not ticket_repo.get_ticket_by_channel(channel.id):
             await interaction.response.send_message("此頻道不是工單頻道", ephemeral=True)

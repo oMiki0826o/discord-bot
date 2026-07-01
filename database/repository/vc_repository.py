@@ -16,7 +16,6 @@ Modification():
 
 from __future__ import annotations
 
-import json
 
 from database.ai.sqlite import get_connection
 

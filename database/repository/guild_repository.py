@@ -11,6 +11,11 @@ Modification():
 - 整合自 Bot-Firefly 的 guild_service，改為 Repository Pattern
 - 新增工單、日誌、歡迎、身份組等擴充欄位
 - 使用 UPSERT，讀寫皆為獨立連線
+- 新增 reset_settings()：原本 cogs/guild/guild_settings.py 的
+  $server reset 直接在 Cog 內執行原始 SQL（DELETE FROM guild_settings），
+  違反本檔自身註明的「不含任何業務邏輯，只做資料存取」原則，
+  也讓資料表結構與欄位名稱分散在兩處維護。改為集中於此提供
+  reset_settings()，Cog 端不再直接碰觸 SQL。
 
 """
 
@@ -135,6 +140,16 @@ def increment_ticket_count(guild_id: int) -> int:
     count = c.fetchone()["ticket_count"]
     conn.close()
     return count
+
+
+# ── 重置 ──────────────────────
+
+def reset_settings(guild_id: int) -> None:
+    """刪除指定伺服器的所有設定列，下次 get_settings() 會重新建立預設值。"""
+    conn = get_connection()
+    conn.execute("DELETE FROM guild_settings WHERE guild_id = ?", (guild_id,))
+    conn.commit()
+    conn.close()
 
 
 # ── 啟動時建立資料表 ──────────────────────

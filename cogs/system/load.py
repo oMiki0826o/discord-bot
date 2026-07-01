@@ -8,6 +8,12 @@ Modification():
 - _split_names 共用解析逗號分隔的 extension 名稱。
 - reload_all 失敗訊息使用 logger.exception 紀錄完整堆疊。
 
+- 修正 bot_reload／_handle 的訊息可能超過 Discord 2000 字元訊息上限：
+  原本將所有失敗模組的例外訊息直接 join 成單一字串送出，當多個模組
+  同時失敗（例如重載時某個共用模組剛好有語法錯誤，連帶影響一票
+  import 它的模組）很容易超過上限，導致 ctx.send() 本身又拋出例外。
+  改為依長度切分為多則訊息發送；單一例外字串本身也加上長度截斷。
+
 Description():
 
 - 本檔提供 Owner 專用的 Cog 載入、卸載、重載與關閉指令。
@@ -28,6 +34,15 @@ _ACTION_LABELS: dict[str, str] = {
     "unload": "卸載",
     "reload": "重新載入",
 }
+
+# Discord 訊息內容上限為 2000；留緩衝避免邊界誤差
+_MESSAGE_LIMIT: int = 1900
+
+
+async def _send_chunked(ctx: commands.Context, text: str) -> None:
+    """依 _MESSAGE_LIMIT 將長文字切分為多則訊息依序發送，避免超過 Discord 2000 字元上限。"""
+    for i in range(0, len(text), _MESSAGE_LIMIT):
+        await ctx.send(text[i : i + _MESSAGE_LIMIT])
 
 
 # ── extension 名稱正規化 ──────────────────────
@@ -67,7 +82,10 @@ class Load(commands.Cog):
         except commands.ExtensionNotLoaded:
             await ctx.send(f"`{extension}` 尚未載入")
         except Exception as exc:
-            await ctx.send(f"操作失敗：`{exc}`")
+            text = str(exc)
+            if len(text) > 300:
+                text = text[:300] + "..."
+            await ctx.send(f"操作失敗：`{text}`")
             logger.exception("管理指令失敗：%s", module)
 
     # ── 解析逗號分隔的 extension 名稱清單 ──────────────────────
@@ -108,14 +126,17 @@ class Load(commands.Cog):
                 await self.bot.reload_extension(ext)
                 success.append(ext)
             except Exception as exc:
-                failed.append(f"{ext}（{exc}）")
+                detail = str(exc)
+                if len(detail) > 200:
+                    detail = detail[:200] + "..."
+                failed.append(f"{ext}（{detail}）")
                 logger.exception("bot_reload 失敗：%s", ext)
 
         msg = f"已重新載入 ```{len(success)} 個模組```"
         if failed:
             msg += f"\n失敗 ```{len(failed)} 個```：\n" + "\n".join(failed)
 
-        await ctx.send(msg)
+        await _send_chunked(ctx, msg)
 
     # ── 關閉 Bot ──────────────────────
     @commands.command(name="bot_stop", hidden=True)

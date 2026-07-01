@@ -240,7 +240,9 @@ class VoiceChannel(commands.Cog):
         回傳 VoiceChannel 表示驗證通過；回傳 None 表示已回應錯誤。
         """
         member = interaction.user
-        assert isinstance(member, discord.Member)
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message("此指令僅限伺服器使用", ephemeral=True)
+            return None
 
         if member.voice is None or member.voice.channel is None:
             await interaction.response.send_message(
@@ -528,8 +530,9 @@ class VoiceChannel(commands.Cog):
     @vc_group.command(name="info", description="查看目前臨時頻道的設定")
     async def cmd_info(self, interaction: discord.Interaction) -> None:
         member = interaction.user
-        assert isinstance(member, discord.Member)
-
+        if not isinstance(member, discord.Member):
+            await interaction.response.send_message("此指令僅限伺服器使用", ephemeral=True)
+            return
         if member.voice is None or member.voice.channel is None:
             await interaction.response.send_message("請先加入語音頻道", ephemeral=True)
             return

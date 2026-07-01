@@ -12,6 +12,14 @@ Modification():
 - 類別命名改為 Say（PEP 8）
 - 錯誤處理更細緻
 
+- 修正 /say 在使用者缺少 Manage Messages 時觸發 MissingPermissions 例外，
+  但因 bot.py 原本沒有 CommandTree error handler，使用者看到「互動未能回應」
+  而非任何說明。已兩面修正：
+  1. bot.py 新增 CustomCommandTree.on_error 作為最後防線
+  2. 本指令從 @app_commands.checks.has_permissions（執行期拋出例外）
+     改為 @app_commands.default_permissions（Discord 側前置攔截，
+     Client 直接隱藏或停用此指令，根本不會送達 bot）
+
 """
 
 from __future__ import annotations
@@ -49,7 +57,7 @@ class Say(commands.Cog):
         image3     = "附件圖片 3（選填）",
     )
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
     async def cmd_say(
         self,
         interaction: discord.Interaction,

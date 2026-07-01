@@ -1,17 +1,22 @@
 """
 cogs/ai/chat.py
 
+職責：
+- 監聽 Discord mention 訊息，作為 AI 對話的薄入口
+- 處理附件分流（圖片多模態 Part / file_parser 解析）
+- 管理每位使用者的並發鎖與冷卻機制
+- 長回覆自動轉換為 .txt 附件
+
 Modification():
-- 使用每位使用者獨立 asyncio.Lock 取代全域 bool，避免並發請求競態。
-- 附件上限、冷卻秒數與使用者提示文案改由 settings.json 控制。
-- AI listener 會略過已被辨識為前綴指令的訊息，避免指令與 mention 對話互相干擾。
-- 附件仍分流為 file_parser 解析結果或 Gemini 圖片 Part，單一附件失敗不終止整體流程。
 
-Description():
-
-- 本檔是 Discord mention 訊息與 core.ai.generate() 之間的薄入口。
-- Prompt 組裝、模型路由、記憶與 Gemini 呼叫都留在 core.ai 層處理。
+- 使用每位使用者獨立 asyncio.Lock 取代全域 bool，避免並發請求競態
+- 附件上限、冷卻秒數與使用者提示文案改由 settings.json 控制
+- AI listener 會略過已被辨識為前綴指令的訊息，避免與 mention 對話互相干擾
+- 附件仍分流為 file_parser 解析結果或 Gemini 圖片 Part，單一附件失敗不終止整體流程
+- 補上 from __future__ import annotations（原版遺漏，Python 3.11+ 的 PEP 563 相容性）
 """
+
+from __future__ import annotations
 
 import asyncio
 import io
@@ -55,6 +60,9 @@ class Chat(commands.Cog):
 
     def parse_prompt(self, content: str) -> str:
         """
+
+from __future__ import annotations
+
         從使用者訊息移除 bot 的 mention 標記，取得純文字 prompt。
         Discord mention 有兩種格式：<@ID> 與 <@!ID>（舊格式含驚嘆號）。
         """

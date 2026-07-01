@@ -75,6 +75,8 @@
     "idle_timeout_seconds": 180,
     "default_volume_percent": 50,
     "ffmpeg_path": "ffmpeg",
+    "favorites_per_page": 10,
+    "favorites_load_all_limit": 50,
     "embed_colors": {
       "playing": "blurple",
       "queued": "orange",
@@ -122,6 +124,7 @@
   "dm": {
     "_comment": "私訊轉發與 Owner 回覆橋接設定",
     "forward_map_limit": 200,
+    "recent_senders_limit": 200,
     "owner_reply_prefix": "**Bot 回覆：**\n"
   }
 }

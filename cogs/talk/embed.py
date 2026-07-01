@@ -11,6 +11,9 @@ Modification():
 - 加入 from __future__ import annotations
 - 顏色解析失敗給出明確提示
 
+- 修正 /embed 的權限檢查方式：由 @app_commands.checks.has_permissions
+  改為 @app_commands.default_permissions（原因同 say.py）
+
 """
 
 from __future__ import annotations
@@ -51,7 +54,7 @@ class EmbedBuilder(commands.Cog):
         image_url   = "主要圖片 URL",
         message_id  = "要回覆的訊息 ID",
     )
-    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
     async def cmd_embed(
         self,
         interaction: discord.Interaction,

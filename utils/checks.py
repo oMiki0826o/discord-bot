@@ -7,8 +7,11 @@ utils/checks.py
 
 Modification():
 
-- 移植自 Bot-Firefly/utils/checks.py
-- 新增 slash_is_owner()：app_commands 版的擁有者檢查
+- 修正 owner_only() / slash_owner_only()：原本直接比對
+  application_info().owner.id，當 Bot 應用程式由 Discord Team 擁有時，
+  .owner 不一定對應到實際操作的 Team 成員，導致誤判「非擁有者」。
+- 改為委派 bot.is_owner()（discord.py 內建，已正確處理 Team／
+  個人帳號兩種情況，並自動快取 owner_id / owner_ids）。
 
 """
 
@@ -22,8 +25,7 @@ from discord.ext import commands
 # ── Prefix Command ──────────────────────
 
 async def _is_owner(ctx: commands.Context) -> bool:
-    app = await ctx.bot.application_info()
-    return ctx.author.id == app.owner.id
+    return await ctx.bot.is_owner(ctx.author)
 
 
 def owner_only() -> commands.check:
@@ -34,8 +36,7 @@ def owner_only() -> commands.check:
 # ── Slash Command ──────────────────────
 
 async def _slash_owner_check(interaction: discord.Interaction) -> bool:
-    app = await interaction.client.application_info()
-    return interaction.user.id == app.owner.id
+    return await interaction.client.is_owner(interaction.user)
 
 
 def slash_owner_only() -> app_commands.check:

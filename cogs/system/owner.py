@@ -13,18 +13,19 @@ cogs/system/owner.py
 Modification():
 
 - 恢復 /reply 和 /talk slash 指令（重構時遺失）
-- 新增 _is_owner() 用於 app_commands.check，與 commands.is_owner() 效果相同
-  但適用於 Slash Commands（Interaction 物件而非 Context）
-- 新增 _reply_error() 工具函式，統一 followup/response 發送錯誤訊息的邏輯
-- 新增 _resolve_dm_target() 輔助方法，解析 /reply 的目標使用者 ID
-  優先使用明確提供的 user_id，否則從 Messenger.last_dm_user_id 取得
-- $game 維持原有設定持久化邏輯（write_value 至 settings.json）
+- /reply、/talk 的私訊失敗訊息改用 utils.discord_errors.friendly_http_error()，
+  原本直接顯示 raw exception（例如
+  `400 Bad Request (error code: 50007): Cannot send messages to this user`），
+  現在轉換為可讀的中文說明，且常見錯誤代碼集中於同一處維護。
+- 新增 _is_owner()：app_commands.check 版本的 is_owner 驗證，
+  直接委派 bot.is_owner()（已正確處理 Team／個人帳號擁有的應用程式）。
+- /reply 透過 Messenger.last_dm_user_id 取得預設目標，
+  該屬性已與「轉發是否成功」脫鉤（見 cogs/events/message.py），
+  因此即使轉發給 Owner 失敗，/reply 仍可正確找到最近私訊者。
 
 """
 
 from __future__ import annotations
-
-import logging
 
 import discord
 from discord import app_commands
@@ -32,6 +33,7 @@ from discord.ext import commands
 
 from core.logging.log     import LogManager
 from core.system.settings import get, write_value
+from utils.discord_errors import friendly_http_error
 
 logger = LogManager().get_logger("cogs.system.owner")
 
@@ -54,7 +56,8 @@ def _is_owner() -> app_commands.check:
     app_commands.check 版本的 is_owner 驗證。
 
     commands.is_owner() 只適用於前綴指令（Context），
-    Slash 指令（Interaction）需要獨立實作。
+    Slash 指令（Interaction）需要獨立實作；
+    直接委派 bot.is_owner()，正確處理 Team 擁有的應用程式。
     """
     async def predicate(interaction: discord.Interaction) -> bool:
         return await interaction.client.is_owner(interaction.user)
@@ -181,13 +184,7 @@ class Owner(commands.Cog, name="Owner"):
         content:     str,
         user_id:     str | None = None,
     ) -> None:
-        """
-        以 Bot 身份私訊指定使用者或最近私訊者。
-
-        恢復：此 Slash 指令在重構 cogs/system/owner.py 時遺失，
-        現在重新整合至此檔案。
-        user_id 省略時，透過 Messenger.last_dm_user_id 取得最近私訊者。
-        """
+        """以 Bot 身份私訊指定使用者或最近私訊者。"""
         await interaction.response.defer(ephemeral=True)
 
         target_id = await self._resolve_dm_target(interaction, user_id)
@@ -201,16 +198,13 @@ class Owner(commands.Cog, name="Owner"):
             await _reply_error(interaction, f"找不到使用者 `{target_id}`")
             return
         except discord.HTTPException as e:
-            await _reply_error(interaction, f"取得使用者失敗：`{e}`")
+            await _reply_error(interaction, f"取得使用者失敗：{friendly_http_error(e)}")
             return
 
         try:
             await user.send(f"來自擁有者回覆：\n{content}")
-        except discord.Forbidden:
-            await _reply_error(interaction, "對方關閉私訊")
-            return
         except discord.HTTPException as e:
-            await _reply_error(interaction, f"傳送失敗：`{e}`")
+            await _reply_error(interaction, friendly_http_error(e))
             return
 
         await interaction.followup.send(
@@ -227,7 +221,8 @@ class Owner(commands.Cog, name="Owner"):
         """
         解析 /reply 目標使用者 ID。
 
-        優先使用明確提供的 user_id；省略時從 Messenger.last_dm_user_id 取得。
+        優先使用明確提供的 user_id；省略時從 Messenger.last_dm_user_id 取得
+        （該屬性與「轉發是否成功」脫鉤，只要 Bot 收過 DM 就查得到）。
         任何解析失敗皆回傳 None 並已發送錯誤訊息。
         """
         if user_id is not None:
@@ -262,12 +257,7 @@ class Owner(commands.Cog, name="Owner"):
         content:     str,
         image:       str | None = None,
     ) -> None:
-        """
-        以 Bot 身份主動私訊指定使用者。
-
-        恢復：此 Slash 指令在重構 cogs/system/owner.py 時遺失。
-        image 提供時以 Embed 傳送（方便附加圖片預覽），否則以純文字傳送。
-        """
+        """以 Bot 身份主動私訊指定使用者。"""
         try:
             if image:
                 embed = discord.Embed(description=content)
@@ -282,10 +272,13 @@ class Owner(commands.Cog, name="Owner"):
             )
             logger.info("[owner./talk] → %s: %s", user, content[:80])
 
-        except discord.Forbidden:
-            await interaction.response.send_message("對方關閉私訊", ephemeral=True)
         except discord.HTTPException as e:
-            await interaction.response.send_message(f"傳送失敗：`{e}`", ephemeral=True)
+            # friendly_http_error 會將 50007 等常見代碼轉換為可讀說明，
+            # 例如「對方已關閉私訊，或與 Bot 沒有共同的伺服器」。
+            await interaction.response.send_message(
+                friendly_http_error(e),
+                ephemeral=True,
+            )
 
 
 async def setup(bot: commands.Bot) -> None:

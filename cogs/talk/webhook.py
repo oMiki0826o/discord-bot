@@ -13,6 +13,9 @@ Modification():
 - 加入 from __future__ import annotations
 - 使用 aiohttp 非同步確認 webhook 仍有效（取代 webhook.fetch()）
 
+- 修正 /webhook 的權限檢查方式：由 @app_commands.checks.has_permissions
+  改為 @app_commands.default_permissions（原因同 say.py）
+
 """
 
 from __future__ import annotations
@@ -68,7 +71,7 @@ class WebhookSender(commands.Cog):
         image2     = "附件圖片 2",
         image3     = "附件圖片 3",
     )
-    @app_commands.checks.has_permissions(manage_webhooks=True)
+    @app_commands.default_permissions(manage_webhooks=True)
     async def cmd_webhook(
         self,
         interaction: discord.Interaction,

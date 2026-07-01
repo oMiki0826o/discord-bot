@@ -112,6 +112,7 @@ _DEFAULTS: dict[str, Any] = {
     "embed_footer.music":   "音樂系統",
 
     "dm.forward_map_limit": 200,
+    "dm.recent_senders_limit": 200,
     "dm.owner_reply_prefix": "**Bot 回覆：**\n",
 }
 

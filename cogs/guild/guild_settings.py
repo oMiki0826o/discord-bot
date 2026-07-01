@@ -10,6 +10,8 @@ Modification():
 
 - 歡迎/離開訊息預設範本改由 settings.json 讀取
 - 日誌 Embed footer 從 settings 取得
+- $server reset 改呼叫 guild_repo.reset_settings()，不再於 Cog 內
+  直接執行原始 SQL，與其餘指令一致委派給 Repository 層處理。
 
 """
 
@@ -225,11 +227,7 @@ class GuildSettings(commands.Cog):
     @server_group.command(name="reset", description="重置所有伺服器設定為預設值")
     @app_commands.default_permissions(administrator=True)
     async def cmd_reset(self, interaction: discord.Interaction) -> None:
-        from database.ai.sqlite import get_connection
-        conn = get_connection()
-        conn.execute("DELETE FROM guild_settings WHERE guild_id = ?", (interaction.guild.id,))
-        conn.commit()
-        conn.close()
+        guild_repo.reset_settings(interaction.guild.id)
         guild_repo.get_settings(interaction.guild.id)
         await interaction.response.send_message("伺服器設定已重置為預設值", ephemeral=True)
 

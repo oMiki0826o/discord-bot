@@ -15,6 +15,19 @@ Modification():
 - 一個伺服器可建立多個面板，每個面板最多 25 個按鈕（Discord 限制）
 - 按鈕點擊後若已有身份組則移除（切換邏輯），提供雙向功能
 
+- 修正 _build_panel_embed：原本所有身份組擠在單一 field，
+  累積到一定數量（或描述較長）即超過 Discord 1024 字元上限，
+  觸發 400 error 50035。改為依實際字元數動態切分為多個 field，
+  與 cogs/minecraft/mc_commands.py 的修正方式一致。
+- 新增參數長度限制：label 對應 Discord 按鈕 label 本身就有 80
+  字元硬上限，原本未限制，超長時會在送出訊息時才炸掉；description
+  / title 也補上合理上限，降低觸發上述 1024 字元問題的機率。
+- cmd_add / cmd_remove 的例外處理範圍過窄（只接 NotFound /
+  Forbidden / AssertionError），未涵蓋的 HTTPException（例如表情符號
+  格式不合法、內容超出長度限制）會直接成為未捕捉例外。改為統一
+  捕捉 discord.HTTPException，並用 utils.discord_errors 轉換為
+  可讀訊息。
+
 """
 
 from __future__ import annotations
@@ -27,6 +40,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from database.ai.sqlite import get_connection
+from utils.discord_errors import friendly_http_error
 
 logger = logging.getLogger("bot.roles")
 
@@ -182,6 +196,37 @@ def _parse_style(s: str) -> discord.ButtonStyle:
     }.get(s, discord.ButtonStyle.secondary)
 
 
+# Discord embed 單一 field value 上限為 1024；留緩衝避免邊界誤差
+_FIELD_VALUE_LIMIT: int = 1000
+
+
+def _split_role_lines_to_fields(lines: list[str]) -> list[tuple[str, str]]:
+    """
+    將身份組清單字串依實際字元數動態切分為多個 (field_name, field_value)。
+
+    修正：原版將所有身份組塞入單一 field，面板身份組數量增加
+    （或描述較長）時會超過 Discord 1024 字元上限，觸發 400 error 50035。
+    做法與 cogs/minecraft/mc_commands.py 的 _split_results_to_fields 一致。
+    """
+    fields: list[tuple[str, str]] = []
+    current: list[str] = []
+
+    for line in lines:
+        candidate = "\n".join([*current, line])
+        if len(candidate) > _FIELD_VALUE_LIMIT and current:
+            label = "可選身份組" if not fields else "可選身份組（續）"
+            fields.append((label, "\n".join(current)))
+            current = [line]
+        else:
+            current.append(line)
+
+    if current:
+        label = "可選身份組" if not fields else "可選身份組（續）"
+        fields.append((label, "\n".join(current)))
+
+    return fields
+
+
 def _build_panel_embed(title: str, description: str, roles: list[dict], guild: discord.Guild) -> discord.Embed:
     embed = discord.Embed(
         title       = title,
@@ -194,7 +239,9 @@ def _build_panel_embed(title: str, description: str, roles: list[dict], guild: d
             role = guild.get_role(int(entry["role_id"]))
             name = role.mention if role else f"（已刪除 {entry['role_id']}）"
             lines.append(f"• {name} — {entry.get('description', '')}")
-        embed.add_field(name="可選身份組", value="\n".join(lines), inline=False)
+
+        for field_name, field_value in _split_role_lines_to_fields(lines):
+            embed.add_field(name=field_name, value=field_value, inline=False)
     return embed
 
 
@@ -234,18 +281,25 @@ class RoleManagement(commands.Cog):
 
     @roles_group.command(name="panel", description="建立新的身份組面板")
     @app_commands.describe(
-        title       = "面板標題",
-        description = "面板說明",
+        title       = "面板標題（最多 100 字元）",
+        description = "面板說明（最多 300 字元）",
     )
     @app_commands.default_permissions(manage_roles=True)
     async def cmd_panel(
         self,
         interaction: discord.Interaction,
-        title:       str = "身份組領取",
-        description: str = "點擊下方按鈕以領取或移除身份組",
+        title:       app_commands.Range[str, 1, 100] = "身份組領取",
+        description: app_commands.Range[str, 1, 300] = "點擊下方按鈕以領取或移除身份組",
     ) -> None:
         embed = _build_panel_embed(title, description, [], interaction.guild)
-        msg   = await interaction.channel.send(embed=embed, view=RolePanelView([]))
+
+        try:
+            msg = await interaction.channel.send(embed=embed, view=RolePanelView([]))
+        except discord.HTTPException as e:
+            await interaction.response.send_message(
+                f"建立面板失敗：{friendly_http_error(e)}", ephemeral=True,
+            )
+            return
 
         _upsert_panel(
             guild_id    = interaction.guild.id,
@@ -267,9 +321,9 @@ class RoleManagement(commands.Cog):
     @app_commands.describe(
         message_id  = "面板訊息 ID",
         role        = "要新增的身份組",
-        label       = "按鈕文字（預設使用身份組名稱）",
+        label       = "按鈕文字（預設使用身份組名稱，最多 80 字元）",
         emoji       = "按鈕表情符號（選填）",
-        description = "身份組說明（顯示在 embed 列表）",
+        description = "身份組說明（顯示在 embed 列表，最多 100 字元）",
         style       = "按鈕樣式",
     )
     @app_commands.choices(style=[
@@ -284,10 +338,10 @@ class RoleManagement(commands.Cog):
         interaction: discord.Interaction,
         message_id:  str,
         role:        discord.Role,
-        label:       str | None = None,
+        label:       app_commands.Range[str, 1, 80] | None = None,
         emoji:       str | None = None,
-        description: str        = "",
-        style:       str        = "secondary",
+        description: app_commands.Range[str, 0, 100] = "",
+        style:       str = "secondary",
     ) -> None:
         try:
             msg_id = int(message_id)
@@ -324,8 +378,13 @@ class RoleManagement(commands.Cog):
             msg = await channel.fetch_message(msg_id)
             embed = _build_panel_embed(panel["title"], panel["description"], roles, interaction.guild)
             await msg.edit(embed=embed, view=RolePanelView(roles))
-        except (discord.NotFound, discord.Forbidden, AssertionError) as e:
-            await interaction.response.send_message(f"更新面板失敗：{e}", ephemeral=True)
+        except AssertionError:
+            await interaction.response.send_message("面板所在頻道已不存在或類型錯誤", ephemeral=True)
+            return
+        except discord.HTTPException as e:
+            # 涵蓋 NotFound（訊息已刪除）、Forbidden（權限不足）、
+            # 以及表情符號格式錯誤、內容超出長度限制等其他 400 情況。
+            await interaction.response.send_message(f"更新面板失敗：{friendly_http_error(e)}", ephemeral=True)
             return
 
         _upsert_panel(
@@ -380,8 +439,11 @@ class RoleManagement(commands.Cog):
             msg   = await channel.fetch_message(msg_id)
             embed = _build_panel_embed(panel["title"], panel["description"], updated, interaction.guild)
             await msg.edit(embed=embed, view=RolePanelView(updated))
-        except (discord.NotFound, discord.Forbidden, AssertionError) as e:
-            await interaction.response.send_message(f"更新面板失敗：{e}", ephemeral=True)
+        except AssertionError:
+            await interaction.response.send_message("面板所在頻道已不存在或類型錯誤", ephemeral=True)
+            return
+        except discord.HTTPException as e:
+            await interaction.response.send_message(f"更新面板失敗：{friendly_http_error(e)}", ephemeral=True)
             return
 
         _upsert_panel(
