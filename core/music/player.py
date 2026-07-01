@@ -15,6 +15,28 @@ Modification():
 - idle_timeout 與 default_volume 從 settings.json 讀取
 - _play_next() 中通知 embed import 路徑調整為 core.music.embeds
 
+- 修正 connect() 語音頻道連接逾時（TimeoutError）導致使用者
+  看到空白錯誤訊息的問題：
+  原本 channel.connect() 的逾時例外（asyncio.TimeoutError /
+  Python 3.11 的 TimeoutError）不在 cmd_play 的 except 分支
+  中被識別，str(TimeoutError()) 回傳空字串，讓使用者看到
+  「 」這樣的空白錯誤 embed。
+  改為在 connect() 內捕捉 TimeoutError 並轉換為 ConnectionError
+  附上可讀說明，cmd_play / cmd_playlist 再捕捉 ConnectionError
+  顯示具體錯誤訊息給使用者。
+
+- 修正幽靈連接（ghost connection）問題：
+  原本若 self._vc 存在但 is_connected() 為 False（Bot 被踢出
+  頻道、網路中斷後殘留的失效 VoiceClient），直接嘗試 connect()
+  可能導致 discord.ClientException: Already connected，改為
+  先強制 disconnect() 清除殘留狀態再重新連線。
+
+- add_playlist() 對應 Song.from_playlist() 的 tuple 回傳值，
+  同時傳遞跳過數量給上層，讓 music.py 可以通知使用者。
+
+- voice_connect_timeout 可由 settings.json 的
+  music.voice_connect_timeout 調整（預設 30 秒）。
+
 """
 
 from __future__ import annotations
@@ -56,12 +78,51 @@ class GuildPlayer:
     # ── 連線管理 ──────────────────────
 
     async def connect(self, channel: discord.VoiceChannel) -> discord.VoiceClient:
-        """連線至語音頻道；已連線則移動至新頻道。"""
+        """
+        連線至語音頻道；已連線則移動至新頻道。
+
+        修正：
+        1. 幽靈連接清理：self._vc 存在但 is_connected() 為 False 時，
+           先強制 disconnect() 再重新連線，避免 ClientException。
+        2. TimeoutError → ConnectionError：channel.connect() 逾時時
+           拋出 TimeoutError（Python 3.11+），其 str() 為空字串，
+           直接顯示給使用者毫無意義。改為包裝成 ConnectionError
+           並附上可讀說明。
+        3. 連接逾時秒數由 settings.json music.voice_connect_timeout 控制。
+        """
+        timeout = int(get("music.voice_connect_timeout", 30))
+
         if self._vc and self._vc.is_connected():
             if self._vc.channel.id != channel.id:
-                await self._vc.move_to(channel)
-        else:
-            self._vc = await channel.connect(self_deaf=True)
+                try:
+                    await self._vc.move_to(channel)
+                except TimeoutError as exc:
+                    raise ConnectionError(
+                        f"移動語音頻道逾時（{timeout}s），請確認 Bot 網路連線"
+                    ) from exc
+                except discord.HTTPException as exc:
+                    raise ConnectionError(f"移動語音頻道失敗：{exc}") from exc
+            return self._vc
+
+        # ── 清除幽靈連接 ──────────────────────
+        if self._vc is not None:
+            log.warning("[%s] 清除失效的語音連接", self.guild.name)
+            try:
+                await self._vc.disconnect(force=True)
+            except Exception:
+                pass
+            self._vc = None
+
+        # ── 建立新連接 ──────────────────────
+        try:
+            self._vc = await channel.connect(self_deaf=True, timeout=timeout)
+        except TimeoutError as exc:
+            raise ConnectionError(
+                f"連接語音頻道逾時（{timeout}s），請確認網路連線或稍後再試"
+            ) from exc
+        except discord.ClientException as exc:
+            raise ConnectionError(f"語音頻道連接失敗：{exc}") from exc
+
         return self._vc
 
     async def disconnect(self) -> None:
@@ -106,13 +167,16 @@ class GuildPlayer:
         url:       str,
         requester: discord.Member,
         channel:   discord.TextChannel | None = None,
-    ) -> list[Song]:
-        """解析播放清單並批次加入佇列。"""
+    ) -> tuple[list[Song], int]:
+        """
+        解析播放清單並批次加入佇列。
+        回傳 (成功加入的歌曲清單, 跳過數量)。
+        """
         if channel:
             self.text_channel = channel
 
-        was_active = self.is_active
-        songs      = await Song.from_playlist(url, requester)
+        was_active       = self.is_active
+        songs, skipped   = await Song.from_playlist(url, requester)
 
         for song in songs:
             self.queue.add(song)
@@ -123,7 +187,7 @@ class GuildPlayer:
                     self._auto_notify = False
                     await self._play_next()
 
-        return songs
+        return songs, skipped
 
     # ── 播放核心 ──────────────────────
 
@@ -233,7 +297,7 @@ class GuildPlayer:
 
     @property
     def voice_channel(self) -> discord.VoiceChannel | None:
-        return self._vc.channel if self._vc else None   # type: ignore[return-value]
+        return self._vc.channel if self._vc else None  # type: ignore[return-value]
 
     # ── 閒置計時器 ──────────────────────
 

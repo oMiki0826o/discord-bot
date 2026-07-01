@@ -23,7 +23,7 @@ MODELS: dict[str, str] = {
 
 # ── 嵌入模型 ──────────────────────
 
-EMBED_MODEL: str = "gemini-embedding-2"
+EMBED_MODEL: str = "text-embedding-004"
 
 # ── 預設 / 特殊用途模型 ──────────────────────
 

@@ -102,10 +102,13 @@ def added_song_embed(song: Song, position: int) -> discord.Embed:
 
 # ── 加入播放清單 ──────────────────────
 
-def playlist_added_embed(songs: list[Song]) -> discord.Embed:
+def playlist_added_embed(songs: list[Song], skipped: int = 0) -> discord.Embed:
+    desc = f"共 **{len(songs)}** 首歌曲已加入佇列"
+    if skipped:
+        desc += f"\n（已跳過 **{skipped}** 首無法播放的影片）"
     embed = _base(
         title       = "已加入播放清單",
-        description = f"共 **{len(songs)}** 首歌曲已加入佇列",
+        description = desc,
         color       = _clr("queued"),
     )
     if songs and songs[0].thumbnail:

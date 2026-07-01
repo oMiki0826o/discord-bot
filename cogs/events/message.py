@@ -8,32 +8,21 @@ cogs/events/message.py
 
 Modification():
 
-- 修正「轉發功能靜默失效、log 也看不到」的問題：原本 on_message
-  內部沒有任何外層例外保護。discord.py 的事件監聽器一旦拋出未攔截
-  的例外，框架預設只會把 traceback 印到 stderr，不會經過專案自己
-  的 logging 系統；若 log 是寫檔案或轉發到頻道，就會完全看不到
-  錯誤，外部觀察起來等同「功能沒作用」。現在整個事件處理流程都包在
-  try/except 內，任何失敗都保證會透過 logger.exception 留下完整
-  堆疊，方便定位問題。
-- 將 Owner 解析（_resolve_owner_id）獨立包一層例外保護：
-  resolve_owner_id() 來自外部模組，若其內部拋例外，不應該讓整個
-  on_message 一併中斷、也不應該被吞掉，而是要記錄後安全返回 None，
-  讓呼叫端走「Owner 尚未就緒」的既有分支。
 - 修正 Owner 解析：原本直接使用 application_info().owner，
   當 Bot 應用程式由 Discord Team 擁有時可能解析到無法私訊的對象，
-  造成轉發 owner.send() 靜默失敗。改用 utils.owner_resolver 集中
-  解析（同時正確處理 Team／個人帳號），且每次都先嘗試重新解析，
-  避免使用永久卡住的錯誤結果。
+  造成轉發 owner.send() 靜默失敗（只留一行 error log），
+  外部觀察起來就像「完全沒有轉發」。改用 utils.owner_resolver
+  集中解析（同時正確處理 Team／個人帳號），且每次都先嘗試重新解析
+  快取值，避免使用永久卡住的錯誤結果。
 - 修正 last_dm_user_id 永遠讀不到的問題：原設計把「記住寄件者」
-  與「轉發成功」綁在一起，只要 owner.send() 失敗，_dm_map 就不會
+  與「轉發成功」綁在一起，只要 owner.send() 失敗（例如 Owner
+  本人關閉私訊、與 Bot 無共同伺服器等任何原因），_dm_map 就不會
   被寫入，/reply 也就永遠查不到人。現在改為「收到 DM 當下」就先
   記錄寄件者到獨立的 _recent_senders，與轉發是否成功完全脫鉤；
   _dm_map 則保留原本「轉發訊息 ID → 寄件者」的用途，供 Owner
   直接回覆（reply）轉發訊息時使用。
-- 轉發失敗、附件轉發失敗、回覆橋接失敗皆提升記錄詳細度（附上例外
-  訊息與可能原因），避免問題只留下一行難以排查的 log。
-- 移除所有寫死的數值／字串，改由 core.system.settings 讀取，並在
-  取值時提供合理預設值，維持未來可調整彈性（避免硬編碼）。
+- 轉發失敗時提升記錄詳細度（含例外代碼與可能原因），避免問題
+  只留下一行難以排查的 log。
 
 """
 
@@ -88,28 +77,17 @@ class Messenger(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        """
-        只處理 DM；伺服器訊息交給 commands.Bot 預設流程。
-
-        外層包 try/except：確保任何未預期例外都會被完整記錄下來，
-        而不是被 discord.py 預設的 on_error 印到 stderr 後消失在
-        專案自己的 logging 系統之外。
-        """
+        """只處理 DM；伺服器訊息交給 commands.Bot 預設流程。"""
         if message.author.bot or message.guild is not None:
             return
 
-        try:
-            if await self._handle_owner_reply(message):
-                return
+        if await self._handle_owner_reply(message):
+            return
 
-            # 無論轉發是否成功，先記住寄件者
-            self._remember_sender(message.author.id)
+        # ── 無論轉發是否成功，先記住寄件者 ──────────────────────
+        self._remember_sender(message.author.id)
 
-            await self._forward_dm_to_owner(message)
-        except Exception:
-            logger.exception(
-                "[DM] on_message 發生未預期例外 author=%s", message.author
-            )
+        await self._forward_dm_to_owner(message)
 
     # ── Owner 解析 ──────────────────────
 
@@ -119,16 +97,8 @@ class Messenger(commands.Cog):
 
         每次呼叫都先嘗試重新解析（resolve_owner_id 內部已有快取邏輯，
         成本低），避免快取到「尚未就緒」或錯誤的結果後永久卡住。
-
-        resolve_owner_id 來自外部模組，額外包一層例外保護：即使它
-        拋出例外，也只記錄並回傳既有快取值，不讓例外往外擴散。
         """
-        try:
-            owner_id = await resolve_owner_id(self.bot)
-        except Exception:
-            logger.exception("[DM] resolve_owner_id 解析時發生例外")
-            return self._owner_id
-
+        owner_id = await resolve_owner_id(self.bot)
         if owner_id is not None:
             self._owner_id = owner_id
         return self._owner_id
@@ -191,9 +161,6 @@ class Messenger(commands.Cog):
         """將一般使用者私訊轉發給 Owner。"""
         owner = await self._resolve_owner()
         if owner is None:
-            logger.warning(
-                "[DM] Owner 尚未解析成功，本次私訊未轉發 author=%s", message.author
-            )
             return
         if message.author.id == owner.id:
             return
@@ -206,10 +173,6 @@ class Messenger(commands.Cog):
         ]
         if message.content:
             lines.append(f"內容：{message.content}")
-        elif not message.attachments:
-            # 內容與附件皆為空，通常代表 message_content Intent
-            # 未開啟，導致讀不到文字內容，先記錄以利排查。
-            lines.append("內容：（空，請確認 Bot 是否已開啟 message_content Intent）")
 
         try:
             forward_message = await owner.send("\n".join(lines))

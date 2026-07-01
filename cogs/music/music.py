@@ -88,9 +88,15 @@ class Music(commands.Cog):
                 requester = interaction.user,
                 channel   = interaction.channel,
             )
+        except ConnectionError as exc:
+            # 語音頻道連接逾時或失敗，顯示具體說明
+            await interaction.followup.send(embed=error_embed(str(exc)))
+            return
         except Exception as exc:
             log.exception("[%s] /play 失敗", interaction.guild.name)
-            await interaction.followup.send(embed=error_embed(str(exc)))
+            # 避免 str(exc) 為空（如 TimeoutError），補上類型名稱
+            msg = str(exc) or type(exc).__name__
+            await interaction.followup.send(embed=error_embed(msg))
             return
 
         if was_active:
@@ -117,21 +123,29 @@ class Music(commands.Cog):
 
         try:
             await player.connect(channel)
-            songs = await player.add_playlist(
+            songs, skipped = await player.add_playlist(
                 url,
                 requester = interaction.user,
                 channel   = interaction.channel,
             )
+        except ConnectionError as exc:
+            await interaction.followup.send(embed=error_embed(str(exc)))
+            return
         except Exception as exc:
             log.exception("[%s] /playlist 失敗", interaction.guild.name)
-            await interaction.followup.send(embed=error_embed(str(exc)))
+            msg = str(exc) or type(exc).__name__
+            await interaction.followup.send(embed=error_embed(msg))
             return
 
         if not songs:
-            await interaction.followup.send(embed=error_embed("播放清單為空或無法解析"))
+            await interaction.followup.send(
+                embed=error_embed("播放清單為空或所有影片均無法播放")
+            )
             return
 
-        await interaction.followup.send(embed=playlist_added_embed(songs))
+        await interaction.followup.send(
+            embed=playlist_added_embed(songs, skipped=skipped)
+        )
 
     # ── /skip ──────────────────────
 

@@ -88,7 +88,8 @@
       "off": "循環：關閉",
       "single": "循環：單首",
       "queue": "循環：佇列"
-    }
+    },
+    "voice_connect_timeout": 30
   },
   "ticket": {
     "_comment": "工單系統設定",

@@ -88,6 +88,7 @@ _DEFAULTS: dict[str, Any] = {
 
     "music.max_queue_size":        200,
     "music.idle_timeout_seconds":  180,
+    "music.voice_connect_timeout": 30,
     "music.default_volume_percent": 50,
     "music.ffmpeg_path":           "ffmpeg",
 
