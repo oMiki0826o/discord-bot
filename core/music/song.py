@@ -1,31 +1,43 @@
 """
 core/music/song.py
 
-職責：
-- 定義 Song 資料模型（dataclass）
-- YDL 單曲／播放清單解析（在執行緒池中執行，不阻塞事件迴圈）
-- create_source() 在播放前即時提取串流 URL，避免 YouTube 短期連結逾期
-- duration_str 統一格式化時長
-
 Modification():
 
 - 移植自 music_bot/core/song.py，調整 import 路徑
 - max_queue_size 改由 core.system.settings 讀取，不再依賴獨立 config
 - FFmpeg 路徑從 settings 讀取
+- from_playlist() 加入 ignoreerrors=True，播放清單中版權封鎖或私人
+  影片不再中斷整份清單，改為跳過並回傳跳過數量
+- 新增 _strip_ansi()，清除 yt-dlp 錯誤訊息中的 ANSI 顏色代碼
+- 新增 _normalize_query()，修正搜尋關鍵字含冒號時被 yt-dlp 誤判為
+  URL scheme 導致 NoSupportingHandlers 例外的問題；詳見下方說明
+- from_playlist() 改為要求輸入必須是合法網址，非網址時直接回傳
+  明確錯誤，不再嘗試用 generic extractor 解析
 
-- 修正 from_playlist() 播放清單中版權封鎖或私人影片導致整個清單加入失敗：
-  _YTDL_PLAYLIST 加入 ignoreerrors=True，yt-dlp 遇到無法提取的
-  影片時不拋出例外，改為回傳 None 項目，from_playlist() 過濾後
-  計算跳過數量，回傳 tuple[list[Song], int]（歌曲清單, 跳過數）。
-  單曲提取（_YTDL_SINGLE）維持不設定 ignoreerrors，確保搜尋失敗
-  時能明確告知使用者原因。
+職責：
 
-- 新增 _strip_ansi()：yt-dlp 的錯誤訊息內含 ANSI 顏色代碼
-  （例如 [0;31mERROR:[0m），直接顯示在 Discord embed 時會出現
-  亂碼。統一在例外字串回傳前清除。
+- 定義 Song 資料模型（dataclass）
+- 單曲／播放清單解析（在執行緒池中執行，不阻塞事件迴圈）
+- create_source() 於播放前即時提取串流網址，避免短期網址逾期
+- duration_str 統一格式化時長
 
-- music.voice_connect_timeout 設定鍵新增至 settings.json。
+錯誤重現與修正說明（NoSupportingHandlers: Unsupported url scheme）：
 
+- 現象：使用者以 /play 輸入含冒號的純文字查詢（例如「OP: 只有一個
+  人」這類標題），yt-dlp 拋出
+  `Unable to handle request: Unsupported url scheme: "index"`。
+- 根本原因：_YTDL_BASE 原本僅設定 default_search=ytsearch，
+  依賴 yt-dlp 自行判斷輸入「是否已經是一個網址」。但 yt-dlp 的
+  判斷邏輯對「冒號前的文字」較為敏感，含冒號的純文字查詢容易被
+  誤認成某種未知 scheme 的網址（例如「index: ...」被誤判為
+  scheme 是 "index" 的網址），因而略過 default_search 前綴，
+  直接把整段文字丟給不支援該 scheme 的 generic extractor 處理，
+  最終失敗。
+- 修正方式：不再依賴 yt-dlp 的自動判斷，改由 _normalize_query()
+  在呼叫 yt-dlp 之前，自行判斷輸入是否為合法的 http(s) 網址；
+  非網址一律明確加上 ytsearch: 前綴後再送入 yt-dlp。
+  _YTDL_BASE 仍保留 default_search 設定作為第二層防護，
+  但實際判斷已不再依賴它。
 """
 
 from __future__ import annotations
@@ -39,7 +51,7 @@ from typing import Any
 import discord
 import yt_dlp
 
-from core.system.settings import get
+from core.system.settings import get, get_int
 
 log = logging.getLogger("bot.music.song")
 
@@ -53,13 +65,48 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+# ── 查詢字串正規化 ──────────────────────
+
+_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+
+
+def _search_prefix() -> str:
+    """
+    從 settings 讀取搜尋前綴，預設為 ytsearch。
+
+    設為可調整值而非寫死字串，讓未來若想改為 ytsearch5（取前 5 筆
+    結果供使用者選擇）等變體行為時，不需修改程式碼即可切換。
+    """
+    return get("music.search_prefix", "ytsearch")
+
+
+def _normalize_query(query: str) -> str:
+    """
+    確保非網址的查詢字串一定會被當作搜尋關鍵字處理。
+
+    不依賴 yt-dlp 對「輸入是否像網址」的內部判斷（該判斷對含冒號的
+    純文字查詢不可靠，見檔案頂部說明），改為我們自行判斷：
+    以 http:// 或 https:// 開頭才視為網址原樣傳入，其餘一律加上
+    搜尋前綴，確保 yt-dlp 一定會走搜尋路徑而非誤判為未知 scheme。
+    """
+    cleaned = query.strip()
+    if _URL_RE.match(cleaned):
+        return cleaned
+    return f"{_search_prefix()}:{cleaned}"
+
+
+def _is_valid_url(text: str) -> bool:
+    """判斷輸入是否為合法的 http(s) 網址。"""
+    return bool(_URL_RE.match(text.strip()))
+
+
 # ── YT-DLP 配置 ──────────────────────
 
 _YTDL_BASE: dict[str, Any] = {
     "format":         "bestaudio/best",
     "quiet":          True,
     "no_warnings":    True,
-    "default_search": "ytsearch",
+    "default_search": "ytsearch",  # 第二層防護；實際判斷已由 _normalize_query() 處理
     "source_address": "0.0.0.0",
 }
 
@@ -72,10 +119,11 @@ _YTDL_PLAYLIST = yt_dlp.YoutubeDL(
     {**_YTDL_BASE, "noplaylist": False, "ignoreerrors": True}
 )
 
-# ── FFmpeg 配置（斷線自動重連） ──────────────────────
+
+# ── FFmpeg 配置 ──────────────────────
 
 def _ffmpeg_opts() -> dict[str, str]:
-    """從 settings 讀取 ffmpeg 路徑，組裝 FFmpeg 選項。"""
+    """從 settings 讀取 ffmpeg 路徑，組裝 FFmpeg 選項（含斷線自動重連）。"""
     return {
         "executable":     get("music.ffmpeg_path", "ffmpeg"),
         "before_options": (
@@ -119,7 +167,7 @@ def format_duration(seconds: int) -> str:
 class Song:
     """
     單首歌曲的不可變資料容器。
-    串流 URL 不在此儲存，由 create_source() 播放前即時提取。
+    串流網址不在此儲存，由 create_source() 播放前即時提取。
     """
 
     title:       str
@@ -137,11 +185,18 @@ class Song:
 
     @classmethod
     async def from_query(cls, query: str, requester: discord.Member) -> "Song":
-        """從搜尋關鍵字或 URL 建立 Song。"""
+        """
+        從搜尋關鍵字或網址建立 Song。
+
+        query 在送入 yt-dlp 前會先經過 _normalize_query() 正規化，
+        非網址一律轉換為明確的搜尋語法，避免含冒號的查詢字串被
+        誤判為未知 scheme 的網址。
+        """
+        normalized = _normalize_query(query)
         loop = asyncio.get_event_loop()
         try:
             data: dict[str, Any] = await loop.run_in_executor(
-                None, _extract, _YTDL_SINGLE, query,
+                None, _extract, _YTDL_SINGLE, normalized,
             )
         except Exception as exc:
             raise ValueError(_strip_ansi(str(exc))) from exc
@@ -160,11 +215,19 @@ class Song:
         """
         解析 YouTube 播放清單，回傳 (成功歌曲清單, 跳過數量)。
 
+        與 from_query 不同，這裡不會把非網址輸入轉換成搜尋語法：
+        /playlist 指令語意上就是要求提供播放清單網址，若輸入不是
+        合法網址，直接回傳明確錯誤，避免產生語意不清的搜尋結果，
+        也避免同樣落入 generic extractor 誤判 scheme 的情況。
+
         ignoreerrors=True 使 yt-dlp 遇到版權封鎖、私人影片或地區限制的
         影片時不拋出例外，而是在 entries 中回傳 None。
         此處過濾 None 並計算跳過數量，讓呼叫端可告知使用者詳情。
         """
-        limit = int(get("music.max_queue_size", 200))
+        if not _is_valid_url(url):
+            raise ValueError("請提供有效的播放清單網址（需以 http:// 或 https:// 開頭）")
+
+        limit = get_int("music.max_queue_size", 200)
         loop  = asyncio.get_event_loop()
         try:
             data: dict[str, Any] = await loop.run_in_executor(
@@ -192,7 +255,12 @@ class Song:
     # ── 音訊來源 ──────────────────────
 
     async def create_source(self) -> discord.FFmpegPCMAudio:
-        """播放前即時提取最新串流 URL，建立 FFmpeg 音訊來源。"""
+        """
+        播放前即時提取最新串流網址，建立 FFmpeg 音訊來源。
+
+        self.webpage_url 來自 yt-dlp 回傳的 webpage_url 欄位，
+        必為合法網址，不需經過 _normalize_query() 處理。
+        """
         loop = asyncio.get_event_loop()
         try:
             data: dict[str, Any] = await loop.run_in_executor(

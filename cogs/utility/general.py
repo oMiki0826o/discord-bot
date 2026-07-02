@@ -1,12 +1,6 @@
 """
 cogs/utility/general.py
 
-職責：
-- /ping：顯示 Bot WebSocket 延遲
-- /help：分頁顯示所有 Slash Commands（自動分頁，支援 25+ 指令）
-- /hi、/hyw：互動問候指令
-- /botinfo：顯示 Bot 基本資訊
-
 Modification():
 
 - 修正 /help 因 Slash Commands 數量超過 25 個，
@@ -15,6 +9,14 @@ Modification():
 - 指令數量超過 FIELDS_PER_PAGE 時自動分頁，並顯示翻頁按鈕
 - 單頁時不顯示翻頁按鈕，維持原有簡潔 UI
 - 分頁 View 逾時後自動停用按鈕，避免殭屍互動
+- 移除 /hi 問候語中的裝飾符號，維持專案不使用 emoji 的規範
+
+職責：
+
+- /ping：顯示 Bot WebSocket 延遲
+- /help：分頁顯示所有 Slash Commands（自動分頁，支援 25+ 指令）
+- /hi、/hyw：互動問候指令
+- /botinfo：顯示 Bot 基本資訊
 
 """
 
@@ -221,7 +223,7 @@ class General(commands.Cog):
     async def cmd_hi(self, interaction: discord.Interaction) -> None:
         name = get("ai.persona_name", "流螢")
         await interaction.response.send_message(
-            f"早ㄤ，{interaction.user.mention}！我是 {name}。Ciallo (∠·ω )⌒ ☆"
+            f"早ㄤ，{interaction.user.mention}！我是 {name}。Ciallo (∠·ω )⌒"
         )
 
     # ── /hyw ──────────────────────

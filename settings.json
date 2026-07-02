@@ -89,7 +89,10 @@
       "single": "循環：單首",
       "queue": "循環：佇列"
     },
-    "voice_connect_timeout": 30
+    "voice_connect_timeout": 30,
+    "search_prefix": "ytsearch",
+    "voice_health_check_interval_seconds": 15,
+    "voice_reconnect_grace_seconds": 60
   },
   "ticket": {
     "_comment": "工單系統設定",
@@ -127,5 +130,22 @@
     "forward_map_limit": 200,
     "recent_senders_limit": 200,
     "owner_reply_prefix": "**Bot 回覆：**\n"
+  },
+  "link_preview": {
+    "_comment": "連結預覽設定：Bilibili／Instagram／Threads／Pinterest 被動預覽，以及「摘要」關鍵字觸發的通用網頁摘要",
+    "enabled": true,
+    "max_embeds_per_message": 3,
+    "cache_size": 200,
+    "request_timeout_seconds": 10,
+    "embed_description_max_chars": 800,
+    "attach_video": true,
+    "video_max_upload_mb": 8,
+    "bilibili_fetch_video": false,
+    "summary_trigger_min_chars": 60,
+    "summary_max_chars": 200,
+    "summary_input_max_chars": 4000,
+    "summary_keyword": "摘要",
+    "summary_fetch_max_chars": 6000,
+    "summary_fail_message": "無法擷取這個網址的內容，可能是網站封鎖爬取或內容非純文字頁面。"
   }
 }

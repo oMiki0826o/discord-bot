@@ -91,6 +91,9 @@ _DEFAULTS: dict[str, Any] = {
     "music.voice_connect_timeout": 30,
     "music.default_volume_percent": 50,
     "music.ffmpeg_path":           "ffmpeg",
+    "music.search_prefix":         "ytsearch",
+    "music.voice_health_check_interval_seconds": 15,
+    "music.voice_reconnect_grace_seconds":       60,
 
     "ticket.channel_prefix":   "ticket-",
     "ticket.category_name":    "工單",
@@ -112,9 +115,24 @@ _DEFAULTS: dict[str, Any] = {
     "embed_footer.default": "Firefly Bot",
     "embed_footer.music":   "音樂系統",
 
-    "dm.forward_map_limit": 200,
+    "dm.forward_map_limit":    200,
     "dm.recent_senders_limit": 200,
-    "dm.owner_reply_prefix": "**Bot 回覆：**\n",
+    "dm.owner_reply_prefix":   "**Bot 回覆：**\n",
+
+    # ── 連結預覽 ──────────────────────
+    "link_preview.enabled":                     True,
+    "link_preview.max_embeds_per_message":      3,
+    "link_preview.cache_size":                  200,
+    "link_preview.request_timeout_seconds":     10,
+    "link_preview.embed_description_max_chars": 800,
+    "link_preview.attach_video":                True,
+    "link_preview.video_max_upload_mb":         8,
+    "link_preview.bilibili_fetch_video":        False,
+    "link_preview.summary_trigger_min_chars":   60,
+    "link_preview.summary_max_chars":           200,
+    "link_preview.summary_input_max_chars":     4000,
+    "link_preview.summary_keyword":             "摘要",
+    "link_preview.summary_fetch_max_chars":     6000,
 }
 
 

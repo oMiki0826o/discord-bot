@@ -1,6 +1,6 @@
 # 流螢醬 Discord Bot
 
-基於 discord.py 2.x 的多功能 Discord Bot，整合 AI 對話（Google Gemini）、音樂播放、伺服器管理、工單系統、臨時語音頻道等功能。
+基於 discord.py 2.x 的多功能 Discord Bot，整合 AI 對話（Google Gemini）、音樂播放、伺服器管理、工單系統、臨時語音頻道、連結預覽等功能。
 
 ---
 
@@ -10,6 +10,7 @@
 - [快速啟動](#快速啟動)
 - [設定檔說明](#設定檔說明)
 - [專案結構](#專案結構)
+- [連結預覽（Bilibili／Instagram／Threads／Pinterest／關鍵字摘要）](#連結預覽biliblili instagram threads pinterest 關鍵字摘要)
 - [Slash 指令一覽](#slash-指令一覽)
 - [Prefix 指令一覽（$）](#prefix-指令一覽)
 - [權限對照表](#權限對照表)
@@ -27,6 +28,9 @@
 ```
 pip install -r requirements.txt
 ```
+
+> 連結預覽功能新增以下依賴，若尚未加入 `requirements.txt` 請一併補上：
+> `httpx`（非同步 HTTP 請求）、`google-genai`（Gemma 摘要生成，與既有 AI 對話功能共用同一套 SDK，不需額外申請金鑰）。純文字擷取（Pinterest／關鍵字摘要）採輕量正規表示式解析，不需要額外安裝 BeautifulSoup 或 lxml。
 
 ---
 
@@ -65,6 +69,20 @@ python bot.py
 | `moderation.dm_target_on_warn` | 警告時是否私訊被警告者 | `true` |
 | `dm.forward_map_limit` | 私訊橋接記憶筆數上限 | `200` |
 | `dm.recent_senders_limit` | /reply 最近私訊者追蹤筆數 | `200` |
+| `link_preview.enabled` | 是否啟用連結預覽功能（含被動預覽與關鍵字摘要） | `true` |
+| `link_preview.max_embeds_per_message` | 單一訊息最多處理幾個被動預覽連結 | `3` |
+| `link_preview.cache_size` | 連結預覽結果快取筆數上限 | `200` |
+| `link_preview.request_timeout_seconds` | 對外請求逾時秒數 | `10` |
+| `link_preview.embed_description_max_chars` | Embed 內文最大字數（超過會截斷並加上刪節號） | `800` |
+| `link_preview.summary_trigger_min_chars` | 被動預覽的簡介文字達到幾字才觸發 Gemma 自動摘要 | `60` |
+| `link_preview.summary_max_chars` | 摘要輸出字數上限 | `200` |
+| `link_preview.summary_input_max_chars` | 送入 Gemma 摘要前，原文截斷長度上限 | `4000` |
+| `link_preview.attach_video` | 是否嘗試下載影片並以附件方式重新上傳 | `true` |
+| `link_preview.video_max_upload_mb` | 影片附件下載／上傳大小上限（MB） | `8` |
+| `link_preview.bilibili_fetch_video` | 是否額外呼叫 Bilibili 播放網址 API 取得影片 | `false` |
+| `link_preview.summary_keyword` | 觸發通用網頁摘要的關鍵字 | `摘要` |
+| `link_preview.summary_fetch_max_chars` | 關鍵字摘要功能抓取網頁純文字的長度上限 | `6000` |
+| `link_preview.summary_fail_message` | 網頁爬取失敗時的回覆訊息 | `無法擷取這個網址的內容，可能是網站封鎖爬取或內容非純文字頁面。` |
 
 執行 `$settings reload` 即可熱更新，無需重啟 Bot。
 
@@ -87,6 +105,7 @@ bot/
 │   │   └── info.py                # AI 使用說明
 │   ├── events/
 │   │   ├── message.py             # 私訊轉發 & Owner 回覆橋接
+│   │   ├── link_preview.py        # 連結預覽（Bilibili／Instagram／Threads）
 │   │   └── status.py              # Bot 狀態管理
 │   ├── guild/
 │   │   └── guild_settings.py      # 伺服器設定指令群組
@@ -118,6 +137,22 @@ bot/
 │
 ├── core/                     # 業務邏輯核心（不含 Discord 直接依賴）
 │   ├── ai/                        # AI 推論、上下文、記憶、限速
+│   │   └── models.py               # Gemini / Gemma 模型名稱常數（唯一來源）
+│   ├── link_preview/               # 連結預覽核心邏輯（不含 Discord 直接依賴）
+│   │   ├── base.py                    # LinkPreview / LinkStat 統一資料結構
+│   │   ├── detector.py                # 從訊息文字偵測支援的平台連結
+│   │   ├── flags.py                   # 布林設定讀取輔助
+│   │   ├── http.py                    # 共用 httpx.AsyncClient 設定
+│   │   ├── og_meta.py                 # 通用 Open Graph meta 標籤解析
+│   │   ├── article.py                 # 通用網頁純文字擷取（關鍵字摘要用）
+│   │   ├── summary_trigger.py         # 「關鍵字 + 網址」摘要請求偵測
+│   │   ├── bilibili.py                # Bilibili 擷取器（含防 412 標頭）
+│   │   ├── instagram.py               # Instagram 擷取器
+│   │   ├── threads.py                 # Threads 擷取器
+│   │   ├── pinterest.py               # Pinterest 擷取器
+│   │   ├── registry.py                # 平台字串 → 擷取器 對應表
+│   │   ├── summarizer.py              # 使用 Gemma 生成內容摘要
+│   │   └── video.py                   # 影片下載與 Bilibili 播放網址解析
 │   ├── logging/                   # 統一日誌設定
 │   ├── minecraft/                 # 珍珠炮計算引擎
 │   ├── music/                     # 音樂播放器引擎
@@ -142,6 +177,41 @@ bot/
     ├── helpers.py                 # 通用輔助函式
     └── owner_resolver.py          # Bot Owner ID 解析（含 Team 支援）
 ```
+
+---
+
+## 連結預覽（Bilibili／Instagram／Threads／Pinterest／關鍵字摘要）
+
+`cogs/events/link_preview.py` 提供兩個彼此獨立、可能同時觸發的功能：
+
+### 1. 被動預覽（不需關鍵字，貼連結即觸發）
+
+Discord 對 Bilibili 短連結（`b23.tv`）、Instagram、Threads、Pinterest 的原生 Embed 支援不佳，常見完全沒有預覽或只顯示極少資訊。偵測到這四類連結時會自動重新產生一份完整的預覽，作法比照「縮圖修復」類第三方 Bot：
+
+1. **偵測**：`core/link_preview/detector.py` 掃描訊息文字中的網址，比對是否屬於 `b23.tv`／`bilibili.com`／`instagram.com`／`threads.com`／`threads.net`／`pinterest.com`／`pin.it`。
+2. **擷取**：依平台呼叫對應擷取器。
+   - **Bilibili**：先解析 `b23.tv` 短連結重定向，再呼叫 Bilibili 公開 API 取得標題、簡介、封面、時長、UP 主與觀看／按讚／投幣／收藏／分享數；請求固定帶上 `Referer` / `Origin` 標頭，避免 Bilibili API 因缺少這兩個標頭回傳 `412`。
+   - **Instagram／Threads／Pinterest**：解析頁面的 `og:*` meta 標籤取得標題、說明文字、縮圖／影片網址（Instagram／Threads 在未登入狀態下頁面資訊有限，屬於平台本身限制，詳見〈已知問題與排除〉）。
+3. **簡介摘要**：若簡介文字長度超過 `link_preview.summary_trigger_min_chars`，改用 Gemma（`core/ai/models.py` 的 `MODELS["gemma"]`）生成繁體中文摘要取代原文，控制 token 用量。
+4. **影片**：若擷取到可下載的影片網址，且大小在 `link_preview.video_max_upload_mb` 範圍內，會下載並以附件形式重新上傳；超過大小上限則退回「僅顯示縮圖 + 原始連結」。
+5. **組裝與回覆**：組成 Embed（作者列／來源列／統計數據列／標題／縮圖或影片）並以回覆方式送出；內文超過 `link_preview.embed_description_max_chars` 會自動截斷，避免超過 Discord Embed 長度上限。若 Bot 具備「管理訊息」權限，會嘗試抑制原訊息的低品質原生 Embed。
+
+新增其他平台時，只需在 `core/link_preview/` 新增一個擷取器並於 `registry.py` 註冊，`detector.py` 加入網域規則即可，不需修改 Cog 內的事件處理邏輯。
+
+### 2. 關鍵字摘要（需明確關鍵字，不限定平台）
+
+被動預覽只處理上述四個平台；若想針對「任何網址」（新聞、部落格、論壇文章等）取得摘要，需在訊息中包含關鍵字（預設「摘要」，可由 `link_preview.summary_keyword` 調整）並緊接著網址，例如：
+
+```
+摘要https://example.com/news/123
+幫我摘要一下 https://example.com/article
+```
+
+流程：`core/link_preview/summary_trigger.py` 偵測到「關鍵字 + 網址」後，由 `core/link_preview/article.py` 抓取該網址並清理成純文字（移除 script/style 與 HTML 標籤），交給 `summarizer.py` 用 Gemma 生成摘要並回覆；若頁面請求失敗、內容非文字類型、或清理後為空，會直接回覆 `link_preview.summary_fail_message` 設定的訊息（預設「無法擷取這個網址的內容，可能是網站封鎖爬取或內容非純文字頁面。」）。
+
+此功能刻意需要關鍵字才觸發，是因為它會對「任意」網址發送請求並呼叫 Gemma，若像被動預覽一樣自動觸發，會讓每則貼連結的訊息都消耗 API 額度；而 Bilibili／Instagram／Threads／Pinterest 等平台本身多為 JavaScript 單頁應用，直接抓取網頁純文字通常效果不佳，因此這個功能較適合文字內容較完整的一般網頁。
+
+> **設計備註**：曾有另一版 `cogs/events/bilibili.py`（獨立 Cog）與 `core/utils/bilibili.py`（同步版工具函式）的實作方案，內含「Bilibili API 需要 Referer / Origin 標頭避免 412」這個有價值的修正，已併入 `core/link_preview/bilibili.py`；但這兩個檔案本身不會建立在專案中——獨立 Cog 會與本檔案同時處理 Bilibili 連結、造成同一則連結被回覆兩次，`core/utils/bilibili.py` 則會與既有的 `core/link_preview/bilibili.py` 形成兩份平行邏輯、增加日後維護時漏改其中一邊的風險。
 
 ---
 
@@ -346,7 +416,7 @@ $game watching you          → 觀看：you
 ```
 
 `$settings show` 可用 section：
-`bot` / `ai` / `music` / `ticket` / `voice_channel` / `guild` / `moderation` / `embed_footer`
+`bot` / `ai` / `music` / `ticket` / `voice_channel` / `guild` / `moderation` / `embed_footer` / `link_preview`
 
 ### AI 系統管理（Owner 專用）
 
@@ -401,6 +471,27 @@ AI 使用者階層說明：
 
 ---
 
+### 連結預覽沒有反應 / 資訊不完整
+
+檢查以下項目：
+
+1. `settings.json` 的 `link_preview.enabled` 是否為 `true`
+2. Bot 的 Intents 是否已開啟 `message_content`（讀不到訊息文字就偵測不到連結或關鍵字）
+3. **Instagram／Threads／Pinterest 屬於平台本身限制**：三者未登入狀態下頁面能取得的 `og:*` 標籤本來就有限，有時只能取得標題與極少描述，屬於預期行為而非程式錯誤；如需更完整資料，需要額外串接登入態 Cookie（尚未內建，可依 `core/link_preview/instagram.py`／`threads.py`／`pinterest.py` 內的註解自行擴充）。
+4. 影片沒有被上傳為附件：多半是超過 `link_preview.video_max_upload_mb` 大小上限而自動退回「僅縮圖 + 連結」，屬正常降級行為。
+5. Bilibili API 回傳 `412`：已固定在請求加上 `Referer` / `Origin` 標頭修正，若仍發生，可能是 Bilibili 端另外調整了防爬機制，需重新確認所需標頭。
+
+### 「摘要」關鍵字沒有反應 / 一直回覆無法擷取
+
+檢查以下項目：
+
+1. 關鍵字是否與 `settings.json` 的 `link_preview.summary_keyword` 一致（預設為「摘要」，需完整符合，不支援同義詞）
+2. 網址是否緊接在關鍵字之後的同一則訊息內
+3. 目標網站是否為需要登入或大量依賴 JavaScript 渲染的頁面（例如單頁應用），此類網站伺服器端回傳的 HTML 本身文字量就很少，屬於純文字擷取方式的固有限制，不是程式錯誤
+4. `.env` 的 `GEMINI_API` 是否正確設定，缺少此金鑰時摘要會直接失敗
+
+---
+
 ### embedding 模型 404 錯誤
 
 log 中可能出現：
@@ -421,6 +512,30 @@ embed error: 404 NOT_FOUND. models/text-embedding-004 is not found for API versi
 ---
 
 ## Changelog
+
+### 新增項目
+
+**core/link_preview/**（新增，含 base.py / detector.py / flags.py / http.py / og_meta.py / article.py / summary_trigger.py / bilibili.py / instagram.py / threads.py / pinterest.py / registry.py / summarizer.py / video.py）
+- 新增連結預覽核心邏輯：偵測 Bilibili 短連結／Instagram／Threads／Pinterest 連結，擷取標題、簡介、縮圖、影片網址與統計數據，並透過 Gemma 生成長文摘要（相較 Gemini 系列成本較低）
+- 新增 Pinterest 擷取器（含 `pin.it` 短連結），沿用既有的 `og:*` 標籤解析邏輯
+- 新增關鍵字觸發的通用網頁摘要（`article.py` + `summary_trigger.py`）：訊息中出現「摘要」關鍵字並緊接網址時，抓取任意網址的網頁純文字並用 Gemma 摘要，不限定於前述四個平台；爬取失敗時明確回覆無法擷取，與被動預覽的自動觸發邏輯完全獨立
+- Bilibili 擷取器併入防 `412` 的 `Referer` / `Origin` 標頭修正（源自使用者提供的參考實作），並新增時長欄位解析
+- 平台判斷、擷取邏輯與摘要邏輯皆與 Discord 物件解耦，新增平台只需新增一個擷取器並在 `registry.py` 註冊
+
+**cogs/events/link_preview.py**（新增）
+- 監聽伺服器訊息，涵蓋被動預覽（Bilibili／Instagram／Threads／Pinterest，貼連結即觸發）與關鍵字摘要（「摘要」+ 任意網址，需明確關鍵字）兩套獨立流程，可能同時觸發互不影響
+- 被動預覽回覆風格統一的 Embed（比照「縮圖修復」類第三方 Bot 的呈現方式：作者列／來源列／統計數據列／標題／縮圖或影片），內文超長時自動截斷，避免超過 Discord Embed 長度上限
+- 影片會嘗試下載並以附件重新上傳，超過大小上限則自動退回純縮圖呈現
+- 具備「管理訊息」權限時，會嘗試抑制原訊息的低品質原生 Embed
+- 內建行程內快取，避免同一連結短時間內重複發送外部請求
+
+**core/ai/models.py**（新增）
+- 集中定義 Gemini / Gemma 模型名稱常數，作為模型名稱與用途的唯一來源
+- 新增 `MULTIMODAL_MODEL`，圖片附件不再依賴散落的硬編碼模型名稱
+- 連結預覽的兩套摘要功能（被動預覽簡介摘要、關鍵字網頁摘要）皆直接複用 `MODELS["gemma"]`
+
+**settings.json**
+- 正式合併 `link_preview.*` 系列設定至實際專案設定檔（enabled / max_embeds_per_message / cache_size / request_timeout_seconds / embed_description_max_chars / attach_video / video_max_upload_mb / bilibili_fetch_video / summary_trigger_min_chars / summary_max_chars / summary_input_max_chars / summary_keyword / summary_fetch_max_chars / summary_fail_message）
 
 ### 修正項目
 
@@ -448,6 +563,7 @@ embed error: 404 NOT_FOUND. models/text-embedding-004 is not found for API versi
 **cogs/events/message.py**
 - 修正：Owner 解析原本使用 `application_info().owner`，Team 擁有的應用程式會解析到錯誤對象，導致 DM 轉發靜默失敗
 - 新增 `last_dm_user_id` property：改為獨立的 `_recent_senders` 追蹤（與轉發是否成功脫鉤），/reply 即使轉發失敗仍能找到目標
+- `on_message` 加上外層例外保護，避免未攔截例外被 discord.py 預設 `on_error` 印到 stderr、繞過專案自己的 logging 系統，導致「功能靜默失效、log 也看不到」
 
 **cogs/talk/say.py / embed.py / typing_indicator.py / webhook.py**
 - 修正：`@app_commands.checks.has_permissions` 改為 `@app_commands.default_permissions`

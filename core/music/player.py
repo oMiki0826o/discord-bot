@@ -1,42 +1,50 @@
 """
 core/music/player.py
 
-職責：
-- GuildPlayer 管理單一伺服器的完整播放生命週期
-- connect() 支援移動至新頻道而不重新連線
-- add_song() / add_playlist() 加入佇列並在需要時啟動播放
-- _play_next() 串流 URL 在播放前即時提取，避免逾期
-- 閒置計時器：佇列空時啟動，達 idle_timeout 後自動斷線
-- set_volume() 即時更新正在播放的音量
-
 Modification():
 
 - 移植自 music_bot/core/player.py
 - idle_timeout 與 default_volume 從 settings.json 讀取
 - _play_next() 中通知 embed import 路徑調整為 core.music.embeds
-
-- 修正 connect() 語音頻道連接逾時（TimeoutError）導致使用者
-  看到空白錯誤訊息的問題：
-  原本 channel.connect() 的逾時例外（asyncio.TimeoutError /
-  Python 3.11 的 TimeoutError）不在 cmd_play 的 except 分支
-  中被識別，str(TimeoutError()) 回傳空字串，讓使用者看到
-  「 」這樣的空白錯誤 embed。
-  改為在 connect() 內捕捉 TimeoutError 並轉換為 ConnectionError
-  附上可讀說明，cmd_play / cmd_playlist 再捕捉 ConnectionError
-  顯示具體錯誤訊息給使用者。
-
-- 修正幽靈連接（ghost connection）問題：
-  原本若 self._vc 存在但 is_connected() 為 False（Bot 被踢出
-  頻道、網路中斷後殘留的失效 VoiceClient），直接嘗試 connect()
-  可能導致 discord.ClientException: Already connected，改為
-  先強制 disconnect() 清除殘留狀態再重新連線。
-
+- connect() 捕捉 TimeoutError 並轉換為 ConnectionError 附上可讀說明；
+  原本 str(TimeoutError()) 為空字串，使用者只會看到空白錯誤訊息
+- connect() 新增幽靈連接清理：self._vc 存在但 is_connected() 為 False
+  時，先強制 disconnect() 再重新連線，避免 ClientException
 - add_playlist() 對應 Song.from_playlist() 的 tuple 回傳值，
-  同時傳遞跳過數量給上層，讓 music.py 可以通知使用者。
-
+  同時傳遞跳過數量給上層
 - voice_connect_timeout 可由 settings.json 的
-  music.voice_connect_timeout 調整（預設 30 秒）。
+  music.voice_connect_timeout 調整
+- 新增語音連線健康監控（watchdog），修正語音 WebSocket 反覆斷線
+  重連失敗時，殘留任務被垃圾回收而觸發
+  「Task was destroyed but it is pending!」的問題；詳見下方說明
 
+職責：
+
+- GuildPlayer 管理單一伺服器的完整播放生命週期
+- connect() 支援移動至新頻道而不重新連線
+- add_song() / add_playlist() 加入佇列並在需要時啟動播放
+- _play_next() 串流網址在播放前即時提取，避免逾期
+- 閒置計時器：佇列空時啟動，達 idle_timeout 後自動斷線
+- 語音健康監控：語音 WebSocket 持續無法恢復時自動清理連線
+- set_volume() 即時更新正在播放的音量
+
+語音健康監控的背景說明：
+
+- discord.py 的語音資料傳輸使用獨立於 Gateway 的 WebSocket 連線，
+  這條連線因網路問題斷開時（log 中常見的 close code 1006），
+  discord.py 會在同一頻道內自動嘗試重新連線，這與 Discord 伺服器
+  端主動通知「你已離開頻道」的 on_voice_state_update 事件是兩套
+  不同機制：後者我們已在 cogs/music/music.py 監聽並清理，
+  前者卻沒有任何機制可以感知。
+- 若底層網路持續不穩，discord.py 內部的重連迴圈可能長時間停留在
+  pending 狀態，我們的 GuildPlayer 卻毫無感知，繼續持有一個
+  「看似連接、實際上已死」的 VoiceClient；當這個殘留的重連任務
+  最終被垃圾回收時，asyncio 會噴出
+  「Task was destroyed but it is pending!」的警告。
+- 修正方式：_voice_watchdog() 週期性檢查 is_connected()；連續斷線
+  超過寬限時間（music.voice_reconnect_grace_seconds）仍未恢復時，
+  視為連線已死，主動強制斷線並清理狀態，而非放任 discord.py 的
+  內部重連迴圈無限期卡住。
 """
 
 from __future__ import annotations
@@ -48,7 +56,7 @@ import discord
 
 from core.music.queue import MusicQueue, LoopMode
 from core.music.song  import Song
-from core.system.settings import get
+from core.system.settings import get, get_int
 
 log = logging.getLogger("bot.music.player")
 
@@ -75,22 +83,26 @@ class GuildPlayer:
         # True = _play_next 自行發送「正在播放」通知
         self._auto_notify: bool = False
 
+        # ── 語音健康監控狀態 ──────────────────────
+        self._watchdog_task:      asyncio.Task | None = None
+        self._disconnected_since: float        | None = None
+
     # ── 連線管理 ──────────────────────
 
     async def connect(self, channel: discord.VoiceChannel) -> discord.VoiceClient:
         """
         連線至語音頻道；已連線則移動至新頻道。
 
-        修正：
-        1. 幽靈連接清理：self._vc 存在但 is_connected() 為 False 時，
-           先強制 disconnect() 再重新連線，避免 ClientException。
-        2. TimeoutError → ConnectionError：channel.connect() 逾時時
-           拋出 TimeoutError（Python 3.11+），其 str() 為空字串，
-           直接顯示給使用者毫無意義。改為包裝成 ConnectionError
-           並附上可讀說明。
-        3. 連接逾時秒數由 settings.json music.voice_connect_timeout 控制。
+        幽靈連接清理：self._vc 存在但 is_connected() 為 False 時，
+        先強制 disconnect() 再重新連線，避免 ClientException。
+
+        TimeoutError 轉換：channel.connect() 逾時時拋出 TimeoutError，
+        其 str() 為空字串，直接顯示給使用者毫無意義，改為包裝成
+        ConnectionError 並附上可讀說明。
+
+        連接逾時秒數由 settings.json music.voice_connect_timeout 控制。
         """
-        timeout = int(get("music.voice_connect_timeout", 30))
+        timeout = get_int("music.voice_connect_timeout", 30)
 
         if self._vc and self._vc.is_connected():
             if self._vc.channel.id != channel.id:
@@ -123,11 +135,13 @@ class GuildPlayer:
         except discord.ClientException as exc:
             raise ConnectionError(f"語音頻道連接失敗：{exc}") from exc
 
+        self._start_watchdog()
         return self._vc
 
     async def disconnect(self) -> None:
         """中斷連線並完整清理狀態。"""
         self._cancel_idle_timer()
+        self._cancel_watchdog()
         self.queue.clear()
         self.queue.current = None
         if self._vc:
@@ -175,8 +189,8 @@ class GuildPlayer:
         if channel:
             self.text_channel = channel
 
-        was_active       = self.is_active
-        songs, skipped   = await Song.from_playlist(url, requester)
+        was_active     = self.is_active
+        songs, skipped = await Song.from_playlist(url, requester)
 
         for song in songs:
             self.queue.add(song)
@@ -261,7 +275,7 @@ class GuildPlayer:
             self._vc.stop()
 
     def set_volume(self, volume: float) -> None:
-        """設定音量（0.0–2.0），若正在播放則即時套用。"""
+        """設定音量（0.0 至 2.0），若正在播放則即時套用。"""
         self.volume = max(0.0, min(2.0, volume))
         if (
             self._vc
@@ -311,7 +325,72 @@ class GuildPlayer:
         self._idle_task = None
 
     async def _idle_disconnect(self) -> None:
-        timeout = int(get("music.idle_timeout_seconds", 180))
+        timeout = get_int("music.idle_timeout_seconds", 180)
         await asyncio.sleep(timeout)
         log.info("[%s] 閒置 %ds，自動斷線", self.guild.name, timeout)
         await self.disconnect()
+
+    # ── 語音健康監控 ──────────────────────
+
+    def _start_watchdog(self) -> None:
+        """連線成功後啟動健康監控迴圈。"""
+        self._cancel_watchdog()
+        self._disconnected_since = None
+        self._watchdog_task = asyncio.create_task(self._voice_watchdog())
+
+    def _cancel_watchdog(self) -> None:
+        """停止健康監控迴圈（disconnect() 時呼叫）。"""
+        if self._watchdog_task and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+        self._watchdog_task      = None
+        self._disconnected_since = None
+
+    async def _voice_watchdog(self) -> None:
+        """
+        週期性檢查語音連線健康度。
+
+        每隔 music.voice_health_check_interval_seconds 秒檢查一次
+        is_connected()；一旦連續斷線超過
+        music.voice_reconnect_grace_seconds 秒仍未恢復，視為
+        discord.py 內部的自動重連已經失敗，主動強制清理連線，
+        而非放任其無限期卡在 pending 狀態。
+        """
+        interval = get_int("music.voice_health_check_interval_seconds", 15)
+        grace    = get_int("music.voice_reconnect_grace_seconds", 60)
+        loop     = asyncio.get_event_loop()
+
+        while True:
+            await asyncio.sleep(interval)
+
+            if self._vc is None:
+                return  # 已被 disconnect() 清理，監控迴圈自然結束
+
+            if self._vc.is_connected():
+                self._disconnected_since = None
+                continue
+
+            now = loop.time()
+            if self._disconnected_since is None:
+                self._disconnected_since = now
+                continue
+
+            if now - self._disconnected_since < grace:
+                continue
+
+            # ── 超過寬限時間仍未恢復，視為連線已死 ──────────────────────
+            log.warning(
+                "[%s] 語音連線已斷開超過 %ds 仍未恢復，強制清理",
+                self.guild.name, grace,
+            )
+            await self._notify_connection_lost()
+            await self.disconnect()
+            return
+
+    async def _notify_connection_lost(self) -> None:
+        """語音連線判定為已死時，於文字頻道通知使用者（有設定時才發送）。"""
+        if not self.text_channel:
+            return
+        try:
+            await self.text_channel.send("語音連線不穩定，已自動離開頻道，請重新使用 /play")
+        except discord.HTTPException as exc:
+            log.warning("[%s] 無法發送連線中斷通知：%s", self.guild.name, exc)
