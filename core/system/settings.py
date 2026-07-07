@@ -127,12 +127,16 @@ _DEFAULTS: dict[str, Any] = {
     "link_preview.embed_description_max_chars": 800,
     "link_preview.attach_video":                True,
     "link_preview.video_max_upload_mb":         8,
-    "link_preview.bilibili_fetch_video":        False,
+    "link_preview.bilibili_fetch_video":        True,
     "link_preview.summary_trigger_min_chars":   60,
     "link_preview.summary_max_chars":           200,
     "link_preview.summary_input_max_chars":     4000,
     "link_preview.summary_keyword":             "摘要",
     "link_preview.summary_fetch_max_chars":     6000,
+    "link_preview.instagram_proxy_hosts":       ["ddinstagram.com", "kkinstagram.com", "d.ddinstagram.com"],
+    "link_preview.threads_proxy_hosts":         ["www.fixthreads.net", "www.vxthreads.net"],
+    "link_preview.twitter_proxy_hosts":         ["fxtwitter.com", "vxtwitter.com"],
+    "link_preview.tiktok_proxy_hosts":          ["tnktok.com", "vxtiktok.com"],
 }
 
 
@@ -262,6 +266,19 @@ def get_str(path: str, default: str = "") -> str:
     if value is None:
         return default
     return str(value)
+
+
+def get_list(path: str, default: list[Any] | None = None) -> list[Any]:
+    """
+    取得清單設定；值不是 list 時回退 default（避免呼叫端把字串
+    誤當成字元清單疊代）。default 為 None 時視為空清單。
+    """
+    fallback = default if default is not None else []
+    value = get(path, fallback)
+    if isinstance(value, list):
+        return value
+    logger.warning("[settings] %s=%r 非清單格式，使用預設 %r", path, value, fallback)
+    return fallback
 
 
 def get_section(section: str) -> dict[str, Any]:

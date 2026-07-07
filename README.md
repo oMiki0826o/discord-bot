@@ -10,7 +10,7 @@
 - [快速啟動](#快速啟動)
 - [設定檔說明](#設定檔說明)
 - [專案結構](#專案結構)
-- [連結預覽（Bilibili／Instagram／Threads／Pinterest／關鍵字摘要）](#連結預覽biliblili instagram threads pinterest 關鍵字摘要)
+- [連結預覽（Bilibili／Instagram／Threads／Pinterest／Twitter(X)／TikTok／關鍵字摘要）](#連結預覽bilibili-instagram-threads-pinterest-twitterx-tiktok-關鍵字摘要)
 - [Slash 指令一覽](#slash-指令一覽)
 - [Prefix 指令一覽（$）](#prefix-指令一覽)
 - [權限對照表](#權限對照表)
@@ -79,7 +79,11 @@ python bot.py
 | `link_preview.summary_input_max_chars` | 送入 Gemma 摘要前，原文截斷長度上限 | `4000` |
 | `link_preview.attach_video` | 是否嘗試下載影片並以附件方式重新上傳 | `true` |
 | `link_preview.video_max_upload_mb` | 影片附件下載／上傳大小上限（MB） | `8` |
-| `link_preview.bilibili_fetch_video` | 是否額外呼叫 Bilibili 播放網址 API 取得影片 | `false` |
+| `link_preview.bilibili_fetch_video` | 是否額外呼叫 Bilibili 播放網址 API 取得影片並內嵌播放 | `true` |
+| `link_preview.instagram_proxy_hosts` | Instagram 代理服務候選網域清單，依序嘗試 | `["ddinstagram.com", "kkinstagram.com", "d.ddinstagram.com"]` |
+| `link_preview.threads_proxy_hosts` | Threads 代理服務候選網域清單，依序嘗試 | `["www.fixthreads.net", "www.vxthreads.net"]` |
+| `link_preview.twitter_proxy_hosts` | Twitter/X 代理服務候選網域清單，依序嘗試 | `["fxtwitter.com", "vxtwitter.com"]` |
+| `link_preview.tiktok_proxy_hosts` | TikTok 代理服務候選網域清單，依序嘗試 | `["tnktok.com", "vxtiktok.com"]` |
 | `link_preview.summary_keyword` | 觸發通用網頁摘要的關鍵字 | `摘要` |
 | `link_preview.summary_fetch_max_chars` | 關鍵字摘要功能抓取網頁純文字的長度上限 | `6000` |
 | `link_preview.summary_fail_message` | 網頁爬取失敗時的回覆訊息 | `無法擷取這個網址的內容，可能是網站封鎖爬取或內容非純文字頁面。` |
@@ -140,19 +144,22 @@ bot/
 │   │   └── models.py               # Gemini / Gemma 模型名稱常數（唯一來源）
 │   ├── link_preview/               # 連結預覽核心邏輯（不含 Discord 直接依賴）
 │   │   ├── base.py                    # LinkPreview / LinkStat 統一資料結構
-│   │   ├── detector.py                # 從訊息文字偵測支援的平台連結
+│   │   ├── detector.py                # 從訊息文字偵測支援的平台連結（hostname 邊界比對）
+│   │   ├── fallback.py                # 多候選代理網域依序嘗試的共用邏輯
 │   │   ├── flags.py                   # 布林設定讀取輔助
 │   │   ├── http.py                    # 共用 httpx.AsyncClient 設定
-│   │   ├── og_meta.py                 # 通用 Open Graph meta 標籤解析
+│   │   ├── og_meta.py                 # 通用 Open Graph meta 標籤解析（含 og:video）
 │   │   ├── article.py                 # 通用網頁純文字擷取（關鍵字摘要用）
 │   │   ├── summary_trigger.py         # 「關鍵字 + 網址」摘要請求偵測
 │   │   ├── bilibili.py                # Bilibili 擷取器（含防 412 標頭）
-│   │   ├── instagram.py               # Instagram 擷取器
-│   │   ├── threads.py                 # Threads 擷取器
+│   │   ├── instagram.py               # Instagram 擷取器（多候選代理網域）
+│   │   ├── threads.py                 # Threads 擷取器（多候選代理網域）
 │   │   ├── pinterest.py               # Pinterest 擷取器
+│   │   ├── twitter.py                 # Twitter/X 擷取器（多候選代理網域）
+│   │   ├── tiktok.py                  # TikTok 擷取器（多候選代理網域）
 │   │   ├── registry.py                # 平台字串 → 擷取器 對應表
 │   │   ├── summarizer.py              # 使用 Gemma 生成內容摘要
-│   │   └── video.py                   # 影片下載與 Bilibili 播放網址解析
+│   │   └── video.py                   # 影片下載、格式驗證與 Bilibili 播放網址解析
 │   ├── logging/                   # 統一日誌設定
 │   ├── minecraft/                 # 珍珠炮計算引擎
 │   ├── music/                     # 音樂播放器引擎
@@ -180,27 +187,30 @@ bot/
 
 ---
 
-## 連結預覽（Bilibili／Instagram／Threads／Pinterest／關鍵字摘要）
+## 連結預覽（Bilibili／Instagram／Threads／Pinterest／Twitter(X)／TikTok／關鍵字摘要）
 
 `cogs/events/link_preview.py` 提供兩個彼此獨立、可能同時觸發的功能：
 
 ### 1. 被動預覽（不需關鍵字，貼連結即觸發）
 
-Discord 對 Bilibili 短連結（`b23.tv`）、Instagram、Threads、Pinterest 的原生 Embed 支援不佳，常見完全沒有預覽或只顯示極少資訊。偵測到這四類連結時會自動重新產生一份完整的預覽，作法比照「縮圖修復」類第三方 Bot：
+Discord 對 Bilibili 短連結（`b23.tv`）、Instagram、Threads、Pinterest、Twitter/X、TikTok 的原生 Embed 支援不佳，常見完全沒有預覽、只顯示極少資訊，或影片完全無法內嵌。偵測到這六類連結時會自動重新產生一份完整的預覽：
 
-1. **偵測**：`core/link_preview/detector.py` 掃描訊息文字中的網址，比對是否屬於 `b23.tv`／`bilibili.com`／`instagram.com`／`threads.com`／`threads.net`／`pinterest.com`／`pin.it`。
+1. **偵測**：`core/link_preview/detector.py` 解析網址的 hostname 並比對是否屬於已知平台網域。比對方式是「hostname 完全等於候選網域、或以 `.候選網域` 結尾」，而非單純子字串搜尋——這是因為 `x.com` 這類極短網域若用子字串比對，會誤判像 `xbox.com` 這種完全無關的網址。
 2. **擷取**：依平台呼叫對應擷取器。
-   - **Bilibili**：先解析 `b23.tv` 短連結重定向，再呼叫 Bilibili 公開 API 取得標題、簡介、封面、時長、UP 主與觀看／按讚／投幣／收藏／分享數；請求固定帶上 `Referer` / `Origin` 標頭，避免 Bilibili API 因缺少這兩個標頭回傳 `412`。
-   - **Instagram／Threads／Pinterest**：解析頁面的 `og:*` meta 標籤取得標題、說明文字、縮圖／影片網址（Instagram／Threads 在未登入狀態下頁面資訊有限，屬於平台本身限制，詳見〈已知問題與排除〉）。
+   - **Bilibili**：先解析 `b23.tv` 短連結重定向，再呼叫 Bilibili 公開 API 取得標題、簡介、封面、時長、UP 主與觀看／按讚／投幣／收藏／分享數；請求固定帶上 `Referer` / `Origin` 標頭，避免 Bilibili API 因缺少這兩個標頭回傳 `412`。預設會額外呼叫播放網址 API 取得可下載的影片串流，下載後以附件形式重新上傳，讓影片能在 Discord 聊天室內直接播放（而非只顯示縮圖）。
+   - **Instagram／Threads／Twitter(X)／TikTok**：透過社群維運的公開代理服務，解析頁面的 `og:*` meta 標籤取得標題、說明文字、縮圖、影片網址。這類代理服務由個人或社群維運，生命週期不穩定是常態（網域可能停止解析、暫時回應 502 等），因此每個平台皆設有多個候選網域（見〈設定檔說明〉的 `*_proxy_hosts`），依序嘗試直到成功，單一服務失效不會讓整個平台的預覽功能完全停擺。
+   - **Pinterest**：Discord 對 Pinterest 原生支援尚可但不完整，直接請求頁面解析 `og:*` 標籤，`pin.it` 短連結由 httpx 的 `follow_redirects` 自動處理。
 3. **簡介摘要**：若簡介文字長度超過 `link_preview.summary_trigger_min_chars`，改用 Gemma（`core/ai/models.py` 的 `MODELS["gemma"]`）生成繁體中文摘要取代原文，控制 token 用量。
-4. **影片**：若擷取到可下載的影片網址，且大小在 `link_preview.video_max_upload_mb` 範圍內，會下載並以附件形式重新上傳；超過大小上限則退回「僅顯示縮圖 + 原始連結」。
-5. **組裝與回覆**：組成 Embed（作者列／來源列／統計數據列／標題／縮圖或影片）並以回覆方式送出；內文超過 `link_preview.embed_description_max_chars` 會自動截斷，避免超過 Discord Embed 長度上限。若 Bot 具備「管理訊息」權限，會嘗試抑制原訊息的低品質原生 Embed。
+4. **影片**：若擷取到可下載的影片網址，且大小在 `link_preview.video_max_upload_mb` 範圍內，會下載並以附件形式重新上傳，讓影片能在 Discord 內直接播放；下載前會驗證回應的 Content-Type 確實是影片格式（避免代理服務異常時回傳的錯誤頁被誤當成影片上傳），附件副檔名依實際偵測到的格式決定（mp4／webm／mov／mkv），非以上格式或超過大小上限則優雅退回「僅顯示縮圖 + 原始連結」。
+5. **組裝與回覆**：組成 Embed（作者列／來源列／統計數據列／標題／縮圖或影片／原始連結）並以回覆方式送出。內文最後固定附上一行「[查看原始貼文](網址)」的可點擊連結，讓使用者不需要額外點擊標題也能清楚看到並前往原始出處；內文超過 `link_preview.embed_description_max_chars` 會自動截斷，避免超過 Discord Embed 長度上限。若 Bot 具備「管理訊息」權限，會嘗試抑制原訊息的低品質原生 Embed。
 
-新增其他平台時，只需在 `core/link_preview/` 新增一個擷取器並於 `registry.py` 註冊，`detector.py` 加入網域規則即可，不需修改 Cog 內的事件處理邏輯。
+**為何不處理 YouTube**：Discord 對 `youtube.com` / `youtu.be` 連結原生就有官方 oEmbed 支援，會自動顯示標題、頻道、縮圖，並提供可直接播放的內嵌播放器，功能已經完整。若我們再額外發一則自製 Embed，同一則連結會出現兩份重複的預覽，是更差的體驗，因此刻意不處理。
+
+新增其他平台時，只需在 `core/link_preview/` 新增一個擷取器（需要多候選網域容錯時可直接呼叫 `fallback.try_hosts()`）並於 `registry.py` 註冊，`detector.py` 加入網域規則即可，不需修改 Cog 內的事件處理邏輯。
 
 ### 2. 關鍵字摘要（需明確關鍵字，不限定平台）
 
-被動預覽只處理上述四個平台；若想針對「任何網址」（新聞、部落格、論壇文章等）取得摘要，需在訊息中包含關鍵字（預設「摘要」，可由 `link_preview.summary_keyword` 調整）並緊接著網址，例如：
+被動預覽只處理上述六個平台；若想針對「任何網址」（新聞、部落格、論壇文章等）取得摘要，需在訊息中包含關鍵字（預設「摘要」，可由 `link_preview.summary_keyword` 調整）並緊接著網址，例如：
 
 ```
 摘要https://example.com/news/123
@@ -471,6 +481,18 @@ AI 使用者階層說明：
 
 ---
 
+### 連結預覽某平台完全沒有反應
+
+Instagram／Threads／Twitter(X)／TikTok 的預覽依賴社群維運的第三方代理服務，這類服務並非官方維護，網域可能停止解析或暫時故障。系統已對每個平台設定多個候選網域並依序自動嘗試（見〈設定檔說明〉的 `link_preview.*_proxy_hosts`），但若清單中所有候選都同時失效，該平台的預覽就會完全沒有反應。
+
+排除步驟：
+
+1. 查看 log 中 `[連結預覽]` 或對應平台（`bot.link_preview.instagram` 等）的錯誤訊息，確認是 DNS 無法解析（`nodename nor servname provided`）還是伺服器錯誤（`502` / `503`）
+2. 搜尋該平台目前仍在運作的代理服務網域，更新 `settings.json` 對應的 `*_proxy_hosts` 陣列，執行 `$settings reload` 立即生效，不需重啟 Bot
+3. 若只是暫時性的伺服器錯誤（502／503），通常等待一段時間後會自行恢復，不需要更換網域
+
+---
+
 ### 連結預覽沒有反應 / 資訊不完整
 
 檢查以下項目：
@@ -604,3 +626,46 @@ embed error: 404 NOT_FOUND. models/text-embedding-004 is not found for API versi
 - 新增 `music.favorites_per_page`（預設 10）
 - 新增 `music.favorites_load_all_limit`（預設 50）
 - 新增 `dm.recent_senders_limit`（預設 200）
+
+---
+
+### 本輪：連結預覽新增平台、影片內嵌、多候選網域容錯
+
+**core/link_preview/video.py — Bilibili 內嵌播放**
+- 修正：`link_preview.bilibili_fetch_video` 原本預設 `false`，導致 Bilibili 預覽長期只顯示縮圖，「內嵌播放影片」功能形同虛設，預設值改為 `true`
+- 新增下載後的 Content-Type 驗證：代理服務異常時可能回傳 HTML 錯誤頁而非真正影片內容，原本會被誤當成影片直接上傳給 Discord，導致附件完全無法播放；現在下載完成後檢查回應標頭確認是 `video/*` 格式，不是則視為失敗並優雅退回純縮圖模式
+- `download_if_within_limit()` 回傳型別由單純緩衝區改為 `(緩衝區, 副檔名)`：不同平台回傳的影片實際容器格式不一定是 mp4，原本統一寫死 `.mp4` 副檔名，可能導致 Discord 無法正確識別 webm／mov 等格式的內嵌播放器；現在依實際偵測到的 Content-Type 決定副檔名
+
+**core/link_preview/fallback.py**（新增）
+- 統一「多候選代理網域、失敗自動改用下一個」的請求邏輯：`ddinstagram.com` 曾發生 DNS 完全無法解析、`fixthreads.net` 曾回傳 502 Bad Gateway，這類社群維運的反代服務生命週期不穩定是常態；原本每個平台寫死單一網域，該服務一失效整個平台預覽就完全停擺，現在改為候選清單依序嘗試，任一候選能連上即可
+
+**core/link_preview/instagram.py／threads.py**
+- 改用 `fallback.try_hosts()`，候選網域清單由 `settings.json` 的 `instagram_proxy_hosts`／`threads_proxy_hosts` 控制，之後若某代理服務又停止運作，只需調整設定即可，不需修改程式碼
+- 新增讀取 `og:video` 標籤，支援內嵌播放代理服務提供的影片
+
+**core/link_preview/twitter.py／tiktok.py**（新增）
+- 新增 Twitter/X、TikTok 兩個平台的連結預覽，Discord 對這兩個平台的原生 Embed 支援長期不佳，作法與 Instagram／Threads 一致：多候選代理網域、`og:*` 標籤解析、支援內嵌影片
+
+**core/link_preview/detector.py**
+- 修正網域比對邏輯的誤判風險：原本用「子字串是否出現在整個網址中」判斷平台，對極短網域（如新增的 `x.com`）容易誤判，例如 `xbox.com` 本身就包含連續子字串 `x.com`，會被誤判為 Twitter/X 連結。改為解析網址真正的 hostname，要求完全等於候選網域或以 `.候選網域` 結尾，不再對整個網址字串做子字串搜尋
+- 新增 twitter、tiktok 平台規則
+
+**core/link_preview/bilibili.py**
+- `_resolve_redirect()` 的短網址判斷比照 detector.py 改用 hostname 邊界比對，不再用子字串搜尋，風格與其餘平台一致
+
+**core/link_preview/pinterest.py**
+- 新增讀取 `og:video` 標籤，支援影片類型的 Pin 內嵌播放
+
+**cogs/events/link_preview.py**
+- `_build_embed()` 新增「查看原始貼文」超連結行：原本只有標題可以點擊，內文中沒有任何明確的連結文字，容易被使用者忽略；現在固定在內文末端加上一行 Markdown 超連結
+- 支援平台清單擴充為六個（新增 Twitter/X、TikTok），並在文件中說明 YouTube 刻意不處理的原因（Discord 原生官方 oEmbed 支援已完整，重複顯示是更差的體驗）
+- 配合 `video.py` 的新回傳型別，`_maybe_build_video_file()` 不再寫死 `.mp4` 附件檔名
+
+**core/system/settings.py**
+- 新增 `get_list()`：型別安全的清單設定讀取，值不是 list 時回退預設值並記錄警告，避免誤設定導致後續迴圈出現非預期行為
+- `link_preview.bilibili_fetch_video` 預設值改為 `true`
+- 新增 `link_preview.instagram_proxy_hosts`／`threads_proxy_hosts`／`twitter_proxy_hosts`／`tiktok_proxy_hosts` 四組候選網域預設值
+
+**settings.json**
+- 同步新增上述四組候選網域清單
+- `bilibili_fetch_video` 改為 `true`

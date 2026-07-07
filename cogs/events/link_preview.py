@@ -1,31 +1,46 @@
 """
 cogs/events/link_preview.py
 
-職責：
-- 監聽伺服器訊息，涵蓋兩種獨立功能：
-  1. 被動預覽：偵測 Discord 原生 Embed 支援不佳的連結（Bilibili、
-     Instagram、Threads、Pinterest），自動擷取資訊並組成 Embed 回覆。
-  2. 關鍵字摘要：訊息出現「摘要」等關鍵字並緊接任意網址時，爬取
-     該網址的網頁純文字，透過 Gemma 生成摘要後回覆。
-
 Modification():
 
 - 新增本檔案：取代舊有的 cogs/events/bilibili.py，整合多平台連結
-  預覽（Bilibili / Instagram / Threads / Pinterest）與關鍵字摘要。
-- 新增 Pinterest 支援，被動預覽清單擴充為四種平台。
+  預覽與關鍵字摘要
+- 新增 Pinterest、Twitter/X、TikTok 支援，被動預覽清單擴充為
+  六種平台。YouTube 刻意不納入：Discord 對 youtube.com 連結原生
+  就有完整的官方 oEmbed 支援（標題、縮圖、可內嵌播放器），若我們
+  再另外發一則 Embed，會與 Discord 原生預覽重複顯示，對使用者
+  是更差的體驗，因此不處理
 - 新增關鍵字觸發的通用網頁摘要，與被動預覽路徑完全獨立，
-  只要訊息含關鍵字 + 任意網址就會觸發，不限定支援平台。
+  只要訊息含關鍵字 + 任意網址就會觸發，不限定支援平台
 - Embed 內文加上長度防護（_truncate），避免極長的原始簡介超過
-  Discord embed description 4096 字元上限。
+  Discord embed description 4096 字元上限
 - 行程內有界快取（OrderedDict）：避免同一連結短時間重複貼出時
-  重複發送外部請求，大小由 settings.json link_preview.cache_size 控制。
+  重複發送外部請求，大小由 settings.json link_preview.cache_size
+  控制
+- _build_embed() 新增「查看原始貼文」超連結行：原本只有標題可以
+  點擊（embed.url），內文中沒有任何明確的連結文字，使用者容易
+  忽略標題其實可以點擊。現在固定在內文末端加上一行 Markdown
+  超連結，來源與原始網址一目了然
+- 配合 core.link_preview.video.download_if_within_limit() 的新
+  回傳型別（緩衝區, 副檔名），_maybe_build_video_file() 不再寫死
+  .mp4 附件檔名
+
+職責：
+
+- 監聽伺服器訊息，涵蓋兩種獨立功能：
+  1. 被動預覽：偵測 Discord 原生 Embed 支援不佳的連結（Bilibili、
+     Instagram、Threads、Pinterest、Twitter/X、TikTok），自動
+     擷取資訊並組成 Embed 回覆
+  2. 關鍵字摘要：訊息出現「摘要」等關鍵字並緊接任意網址時，爬取
+     該網址的網頁純文字，透過 Gemma 生成摘要後回覆
 
 設計原則：
+
 - 平台判斷、擷取邏輯、摘要邏輯皆下放到 core/link_preview，本檔案
-  只負責「訊息事件 → 呼叫核心邏輯 → 組裝 Embed → 回覆」。
-- 新增平台時只需在 core/link_preview/registry.py 新增一筆，
-  本 Cog 不需修改。
-- 所有數量上限、關鍵字、逾時秒數等皆讀取 settings.json。
+  只負責「訊息事件 → 呼叫核心邏輯 → 組裝 Embed → 回覆」
+- 新增平台時只需在 core/link_preview/registry.py 與 detector.py
+  各新增一筆，本 Cog 不需修改
+- 所有數量上限、關鍵字、逾時秒數等皆讀取 settings.json
 """
 
 from __future__ import annotations
@@ -55,7 +70,7 @@ logger = logging.getLogger("bot.events.link_preview")
 class LinkPreviewCog(commands.Cog):
     """
     處理兩類獨立功能：
-    - 被動預覽：Bilibili / Instagram / Threads / Pinterest
+    - 被動預覽：Bilibili / Instagram / Threads / Pinterest / Twitter / TikTok
     - 關鍵字摘要：「摘要」+ 任意網址
     """
 
@@ -98,7 +113,7 @@ class LinkPreviewCog(commands.Cog):
         if url is None:
             return
 
-        fail_message  = get_str(
+        fail_message = get_str(
             "link_preview.summary_fail_message",
             "無法擷取這個網址的內容，可能是網站封鎖爬取或內容非純文字頁面。",
         )
@@ -119,7 +134,7 @@ class LinkPreviewCog(commands.Cog):
     # ── 被動預覽 ──────────────────────
 
     async def _handle_passive_previews(self, message: discord.Message) -> None:
-        """Bilibili / Instagram / Threads / Pinterest 連結的自動預覽。"""
+        """支援平台連結的自動預覽（見 core.link_preview.detector）。"""
         links = detect_links(message.content)
         if not links:
             return
@@ -205,7 +220,7 @@ class LinkPreviewCog(commands.Cog):
     # ── Embed 組裝 ──────────────────────
 
     def _build_embed(self, preview: LinkPreview) -> discord.Embed:
-        """組裝 Embed：作者列（平台）、來源、統計、標題、說明、縮圖。"""
+        """組裝 Embed：作者列（平台）、來源、統計、標題、說明、縮圖、原始連結。"""
         max_desc_chars = get_int("link_preview.embed_description_max_chars", 800)
 
         lines: list[str] = [preview.source_label, ""]
@@ -226,6 +241,13 @@ class LinkPreviewCog(commands.Cog):
         if body:
             lines.append("")
             lines.append(body)
+
+        # ── 原始連結：內文中固定顯示一行明確的超連結 ──────────────────────
+        # embed.url（標題可點擊）之外，額外提供內文連結，避免使用者
+        # 忽略標題其實可以點擊；[顯示文字](網址) 是 Discord 支援的
+        # Markdown 超連結語法，會被渲染成可點擊的連結。
+        lines.append("")
+        lines.append(f"[查看原始貼文]({preview.url})")
 
         embed = discord.Embed(
             description = "\n".join(lines),
@@ -251,19 +273,21 @@ class LinkPreviewCog(commands.Cog):
         """
         影片網址存在時嘗試下載並包裝為附件；超過大小上限或下載失敗
         則回傳 None，退回「只顯示縮圖 + 連結」的呈現方式。
+
+        附件副檔名依 download_if_within_limit() 實際偵測到的格式
+        決定，不再統一寫死 .mp4。
         """
         if not preview.video_url:
             return None
         if not get_flag("link_preview.attach_video", True):
             return None
 
-        buffer = await download_if_within_limit(
-            preview.video_url, referer=preview.url
-        )
-        if buffer is None:
+        result = await download_if_within_limit(preview.video_url, referer=preview.url)
+        if result is None:
             return None
 
-        return discord.File(buffer, filename=f"{preview.platform}.mp4")
+        buffer, extension = result
+        return discord.File(buffer, filename=f"{preview.platform}.{extension}")
 
     # ── 抑制原生 Embed ──────────────────────
 

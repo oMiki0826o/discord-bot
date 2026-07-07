@@ -1,19 +1,22 @@
 """
 core/link_preview/pinterest.py
 
-職責：
-- 解析 Pinterest Pin 連結，透過 og:* meta 標籤取得標題、說明文字
-  與圖片網址，組裝成 LinkPreview。
-
 Modification():
 
-- 新增本檔案：擴充連結預覽支援 Pinterest 圖片擷取（含 pin.it 短連結）。
+- 新增本檔案：擴充連結預覽支援 Pinterest 圖片擷取（含 pin.it 短連結）
 - pin.it 為短連結，http.build_client() 已設定 follow_redirects=True，
   請求會自動導向至 pinterest.com/pin/... 頁面並回傳該頁 HTML，
-  不需要像 Bilibili 的 b23.tv 那樣額外解析重定向網址。
-- 使用 response.url（即重定向後的最終 URL）作為 LinkPreview.url，
+  不需要像 Bilibili 的 b23.tv 那樣額外解析重定向網址
+- 使用 response.url（即重定向後的最終網址）作為 LinkPreview.url，
   確保傳遞給 Cog 層的網址是完整的 pinterest.com/pin/... 格式，
-  而非原始的 pin.it 短連結。
+  而非原始的 pin.it 短連結
+- 新增讀取 og:video 標籤：部分 Pin 本身是影片內容，取得後交由
+  Cog 層決定是否下載並以附件形式內嵌播放
+
+職責：
+
+- 解析 Pinterest Pin 連結，透過 og:* meta 標籤取得標題、說明文字、
+  圖片網址（部分為影片網址），組裝成 LinkPreview
 """
 
 from __future__ import annotations
@@ -52,5 +55,6 @@ async def extract(url: str) -> LinkPreview | None:
         title          = tags.get("title"),
         description    = tags.get("description"),
         thumbnail_url  = tags.get("image"),
+        video_url      = tags.get("video"),
         color          = 0xE60023,
     )

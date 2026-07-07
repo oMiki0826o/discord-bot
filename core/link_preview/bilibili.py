@@ -1,33 +1,44 @@
 """
 core/link_preview/bilibili.py
 
-職責：
-- 解析 b23.tv 短連結（跟隨重定向取得真正的 bilibili.com 網址）。
-- 呼叫 Bilibili 公開 API（x/web-interface/view）取得影片標題、簡介、
-  封面、時長、UP 主與統計數據，組裝成統一的 LinkPreview 結構。
-- 視設定決定是否額外呼叫播放網址 API，取得可下載的影片網址。
-
 Modification():
 
 - 併入使用者提供的 cogs/events/bilibili.py 的關鍵修正：Bilibili API
   在缺少 Referer / Origin 標頭時有機率回傳 412，因此改為每次請求都
-  帶上固定的 _BILI_HEADERS，而不是散落在多處各自組 headers。
-- 新增時長（duration）解析，比照統計數字共用同一套 LinkStat 顯示邏輯。
+  帶上固定的 _BILI_HEADERS，而不是散落在多處各自組 headers
+- 新增時長（duration）解析，比照統計數字共用同一套 LinkStat 顯示邏輯
 - 不採用同步 requests：Discord 事件迴圈是非同步的，同步請求會整個
-  卡住 Bot，維持既有的 httpx 非同步實作。
+  卡住 Bot，維持既有的 httpx 非同步實作
 - _format_duration 已整合至 utils.formatter.format_duration，移除
-  本地重複實作；備註中提到的「待確認介面」問題已於此次合併解決。
+  本地重複實作
+- link_preview.bilibili_fetch_video 預設值改為 True：原本預設關閉，
+  只會顯示縮圖，實際上讓「內嵌播放影片」這個功能形同虛設。開啟後
+  仍保留原本的降級路徑——影片超過大小上限、下載失敗、API 無法取得
+  播放網址時，一律優雅退回「只顯示縮圖 + 連結」，不影響原有的
+  文字資訊呈現
+- _resolve_redirect 的短網址判斷改用 hostname 邊界比對（與
+  detector.py 的修正方式一致），不再用粗糙的子字串搜尋
+
+職責：
+
+- 解析 b23.tv 短連結（跟隨重定向取得真正的 bilibili.com 網址）
+- 呼叫 Bilibili 公開 API（x/web-interface/view）取得影片標題、簡介、
+  封面、時長、UP 主與統計數據，組裝成統一的 LinkPreview 結構
+- 視設定決定是否額外呼叫播放網址 API，取得可下載並內嵌播放的
+  影片網址
 
 備註：
+
 - 使用的是 Bilibili 未強制登入即可存取的公開 API，僅需 bvid，
   不需要 Cookie。若未來 API 行為改變，可在 http.build_client() 統一
-  附加 Cookie，不需更動本檔案邏輯。
+  附加 Cookie，不需更動本檔案邏輯
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from urllib.parse import urlsplit
 
 from core.link_preview.base import LinkPreview, LinkStat
 from core.link_preview.flags import get_flag
@@ -37,7 +48,7 @@ from utils.formatter import format_duration
 
 logger = logging.getLogger("bot.link_preview.bilibili")
 
-_BVID_RE = re.compile(r"BV[0-9A-Za-z]{10}")
+_BVID_RE  = re.compile(r"BV[0-9A-Za-z]{10}")
 _VIEW_API = "https://api.bilibili.com/x/web-interface/view"
 
 # ── 防 412 headers ──────────────────────
@@ -83,8 +94,8 @@ async def extract(url: str) -> LinkPreview | None:
     stat = data.get("stat", {})
 
     video_url = None
-    cid = data.get("cid")
-    if cid and get_flag("link_preview.bilibili_fetch_video", False):
+    cid       = data.get("cid")
+    if cid and get_flag("link_preview.bilibili_fetch_video", True):
         video_url = await resolve_bilibili_play_url(bvid, cid)
 
     # ── 統計欄位 ──────────────────────
@@ -118,7 +129,8 @@ async def extract(url: str) -> LinkPreview | None:
 
 async def _resolve_redirect(client, url: str) -> str:
     """b23.tv 為短網址，需先發送請求取得最終導向的 bilibili.com 網址。"""
-    if "b23.tv" not in url.lower():
+    hostname = (urlsplit(url).hostname or "").lower()
+    if hostname != "b23.tv" and not hostname.endswith(".b23.tv"):
         return url
     try:
         response = await client.get(url, headers=_BILI_HEADERS)

@@ -132,7 +132,7 @@
     "owner_reply_prefix": "**Bot 回覆：**\n"
   },
   "link_preview": {
-    "_comment": "連結預覽設定：Bilibili／Instagram／Threads／Pinterest 被動預覽，以及「摘要」關鍵字觸發的通用網頁摘要",
+    "_comment": "連結預覽設定：Bilibili／Instagram／Threads／Pinterest／Twitter(X)／TikTok 被動預覽，以及「摘要」關鍵字觸發的通用網頁摘要",
     "enabled": true,
     "max_embeds_per_message": 3,
     "cache_size": 200,
@@ -140,12 +140,29 @@
     "embed_description_max_chars": 800,
     "attach_video": true,
     "video_max_upload_mb": 8,
-    "bilibili_fetch_video": false,
+    "bilibili_fetch_video": true,
     "summary_trigger_min_chars": 60,
     "summary_max_chars": 200,
     "summary_input_max_chars": 4000,
     "summary_keyword": "摘要",
     "summary_fetch_max_chars": 6000,
-    "summary_fail_message": "無法擷取這個網址的內容，可能是網站封鎖爬取或內容非純文字頁面。"
+    "summary_fail_message": "無法擷取這個網址的內容，可能是網站封鎖爬取或內容非純文字頁面。",
+    "instagram_proxy_hosts": [
+      "ddinstagram.com",
+      "kkinstagram.com",
+      "d.ddinstagram.com"
+    ],
+    "threads_proxy_hosts": [
+      "www.fixthreads.net",
+      "www.vxthreads.net"
+    ],
+    "twitter_proxy_hosts": [
+      "fxtwitter.com",
+      "vxtwitter.com"
+    ],
+    "tiktok_proxy_hosts": [
+      "tnktok.com",
+      "vxtiktok.com"
+    ]
   }
 }

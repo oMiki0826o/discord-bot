@@ -4,6 +4,7 @@ core/link_preview/registry.py
 Modification():
 
 - 新增本檔案：將 detector 判斷出的平台字串對應到對應的擷取器函式
+- 新增 twitter、tiktok 兩個平台的註冊
 
 職責：
 
@@ -16,7 +17,7 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable
 
-from core.link_preview import bilibili, instagram, pinterest, threads
+from core.link_preview import bilibili, instagram, pinterest, threads, tiktok, twitter
 from core.link_preview.base import LinkPreview
 
 Extractor = Callable[[str], Awaitable["LinkPreview | None"]]
@@ -26,6 +27,8 @@ _REGISTRY: dict[str, Extractor] = {
     "instagram": instagram.extract,
     "threads":   threads.extract,
     "pinterest": pinterest.extract,
+    "twitter":   twitter.extract,
+    "tiktok":    tiktok.extract,
 }
 
 
