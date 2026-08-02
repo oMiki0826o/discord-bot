@@ -3,6 +3,20 @@ core/system/settings.py
 
 Modification():
 
+- 修正 link_preview.threads_proxy_hosts：www.fixthreads.net 對應的
+  原始專案已被作者封存下線；www.vxthreads.net 誤加了官方沒有的 www
+  字首（官方專案實際部署在不含 www 的 vxthreads.net），這正是 log
+  中兩個候選網域同時失敗的原因。改為 ["vxthreads.net",
+  "viewthreads.com"]，並新增 dead_host_cooldown_seconds 供
+  core/link_preview/fallback.py 的短期冷卻機制使用。
+- link_preview.instagram_proxy_hosts 新增 instagramez.com：與既有的
+  ddinstagram 系列網域完全獨立（不同開發者維運），單純只是增加一個
+  不會同時故障的候選來源，降低同一時間全部候選都失敗的機率。
+- 補齊 music.favorites_per_page / favorites_load_all_limit 與
+  voice_channel.jtc_channel_id / category_id 到 _DEFAULTS：這幾個
+  設定原本只存在於呼叫端（favorites.py / voice_channel.py）
+  get_int() 的行內預設值，能正常運作但沒有集中登記，$settings show
+  完全看不到這幾個鍵，等於是「有效但不可見」的設定。
 - 保留基於 mtime 的 settings.json 熱重載快取。
 - 新增 get_int()、get_float()、get_bool()、get_str()，集中處理設定轉型與 fallback。
 - 補齊 AI 訊息、附件上限與 DM 橋接相關預設值，減少 Cog 內硬編碼。
@@ -94,6 +108,8 @@ _DEFAULTS: dict[str, Any] = {
     "music.search_prefix":         "ytsearch",
     "music.voice_health_check_interval_seconds": 15,
     "music.voice_reconnect_grace_seconds":       60,
+    "music.favorites_per_page":      10,
+    "music.favorites_load_all_limit": 50,
 
     "ticket.channel_prefix":   "ticket-",
     "ticket.category_name":    "工單",
@@ -103,6 +119,8 @@ _DEFAULTS: dict[str, Any] = {
 
     "voice_channel.default_name_template": "{username} 的頻道",
     "voice_channel.default_limit":         0,
+    "voice_channel.jtc_channel_id":        0,
+    "voice_channel.category_id":           0,
 
     "guild.welcome_template": "歡迎 {user} 加入 **{guild}**！目前共有 {count} 名成員。",
     "guild.leave_template":   "**{username}** 離開了 **{guild}**",
@@ -124,6 +142,7 @@ _DEFAULTS: dict[str, Any] = {
     "link_preview.max_embeds_per_message":      3,
     "link_preview.cache_size":                  200,
     "link_preview.request_timeout_seconds":     10,
+    "link_preview.dead_host_cooldown_seconds":  300,
     "link_preview.embed_description_max_chars": 800,
     "link_preview.attach_video":                True,
     "link_preview.video_max_upload_mb":         8,
@@ -133,8 +152,8 @@ _DEFAULTS: dict[str, Any] = {
     "link_preview.summary_input_max_chars":     4000,
     "link_preview.summary_keyword":             "摘要",
     "link_preview.summary_fetch_max_chars":     6000,
-    "link_preview.instagram_proxy_hosts":       ["ddinstagram.com", "kkinstagram.com", "d.ddinstagram.com"],
-    "link_preview.threads_proxy_hosts":         ["www.fixthreads.net", "www.vxthreads.net"],
+    "link_preview.instagram_proxy_hosts":       ["ddinstagram.com", "instagramez.com", "kkinstagram.com", "d.ddinstagram.com"],
+    "link_preview.threads_proxy_hosts":         ["vxthreads.net", "viewthreads.com"],
     "link_preview.twitter_proxy_hosts":         ["fxtwitter.com", "vxtwitter.com"],
     "link_preview.tiktok_proxy_hosts":          ["tnktok.com", "vxtiktok.com"],
 }

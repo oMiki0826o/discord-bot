@@ -1,19 +1,22 @@
 """
 cogs/ticket/ticket.py
 
-職責：
-- 工單（Ticket）系統，提供 /ticket open / close / add / remove / stats
-- 每張工單建立一個私人文字頻道，僅工單建立者與支援身份組可見
-- 工單關閉後：若設定封存類別則移入封存，否則刪除頻道
-- 使用 Slash Commands + Button UI，提供直觀的操作體驗
-
 Modification():
 
+- 移除「關閉工單」「建立工單」按鈕上的 emoji（原本分別是鎖頭與
+  便條紙），改為純文字標籤：專案在別處（例如 general.py 的 /hi
+  問候語）已明確採用不使用 emoji 的規範，這裡的按鈕先前沒有跟上，
+  是本次健檢一併統一的小地方。
 - 全新建立，整合至 firefly-bot 架構
 - 工單建立使用 /ticket open，顯示含「關閉工單」按鈕的 Embed
 - 關閉按鈕（CloseView）以持久化 View 設計，Bot 重啟後仍可響應
 - 冷卻機制與最大開票數限制均從 settings.json 讀取，可熱更新
 
+職責：
+- 工單（Ticket）系統，提供 /ticket open / close / add / remove / stats
+- 每張工單建立一個私人文字頻道，僅工單建立者與支援身份組可見
+- 工單關閉後：若設定封存類別則移入封存，否則刪除頻道
+- 使用 Slash Commands + Button UI，提供直觀的操作體驗
 """
 
 from __future__ import annotations
@@ -52,7 +55,6 @@ class CloseView(discord.ui.View):
     @discord.ui.button(
         label    = "關閉工單",
         style    = discord.ButtonStyle.red,
-        emoji    = "\U0001f512",   # 鎖頭
         custom_id= "ticket:close",
     )
     async def close_button(
@@ -75,7 +77,6 @@ class TicketPanel(discord.ui.View):
     @discord.ui.button(
         label    = "建立工單",
         style    = discord.ButtonStyle.green,
-        emoji    = "\U0001f4dd",   # 便條紙
         custom_id= "ticket:open_panel",
     )
     async def open_panel(

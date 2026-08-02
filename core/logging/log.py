@@ -1,7 +1,10 @@
 """
-bot/core/logging/log.py
+core/logging/log.py
 
 Modification():
+- 修正檔頭路徑：原本寫成 bot/core/logging/log.py，但專案根目錄下
+  沒有 bot/ 這層資料夾（entry point 是根目錄的 bot.py，不是資料夾），
+  實際路徑是 core/logging/log.py。
 
 - 新增 _write_session_header()：每次啟動時寫入 session 分隔線（Python 版本、PID、時間）
 - Singleton 保護、handler 重複掛載防護維持不變

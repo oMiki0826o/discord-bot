@@ -20,11 +20,12 @@ aiohttp==3.14.0
 httpx==0.28.1
 
 # ── 文件解析（file_parser）──────────────────────
-pypdf2>=3.0.0
-pdfminer.six>=20221105
-python-docx>=1.1.0
-openpyxl>=3.1.0
-python-pptx>=0.6.23
+# 修正：原本 pypdf2（安裝後模組名稱是 PyPDF2）與程式碼實際 import 的
+# pypdf 是兩個不同套件，導致 PDF 解析一直靜默失敗。改用 markitdown
+# 統一處理 pdf / docx / xlsx / xls / pptx，需要的底層套件（pdfminer.six /
+# python-docx / openpyxl / python-pptx 等）由 markitdown 依 extra 自動安裝，
+# 不需要再各自於此手動列出版本。
+markitdown[pdf,docx,pptx,xlsx,xls]>=0.1.6
 mutagen>=1.47.0
 pymediainfo>=6.0.0
 

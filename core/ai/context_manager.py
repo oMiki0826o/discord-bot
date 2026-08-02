@@ -2,6 +2,11 @@
 core/ai/context_manager.py
 
 Modification():
+- _get_tools() 新增 channel_id 參數並往下傳給 execute_tools()：
+  這是 tool_registry._exec_memory() 參數錯位 bug 修正鏈的最後一環——
+  channel_id 從這裡開始才「存在」於 tool 執行的呼叫路徑上，
+  execute_tools() 與 tool_registry 的 executor 都需要它才能正確呼叫
+  memory_manager.search()。
 - ContextBundle 新增 files 欄位，用於承接 file_parser 解析後的附件內容。
 - build() 新增 channel_id 與 files 參數，修正記憶搜尋參數錯位問題。
 - 記憶搜尋與工具執行維持並行，降低單次 AI 回應延遲。
@@ -77,7 +82,7 @@ async def build(
 
     # ── 並行取得記憶與 tool 結果 ──────────────────────
     mem_task  = asyncio.create_task(_get_memory(user_id, channel_id, clean, global_mems))
-    tool_task = asyncio.create_task(_get_tools(route, user_id, clean))
+    tool_task = asyncio.create_task(_get_tools(route, user_id, channel_id, clean))
 
     extend_state(user_id)   # 滑動 TTL
 
@@ -131,10 +136,18 @@ async def _get_memory(
 
 
 async def _get_tools(
-    route:   RouteDecision,
-    user_id: str,
-    query:   str,
+    route:      RouteDecision,
+    user_id:    str,
+    channel_id: str,
+    query:      str,
 ) -> list[str]:
-    """執行 route 決定的工具，回傳 prompt 片段列表。"""
+    """
+    執行 route 決定的工具，回傳 prompt 片段列表。
+
+    channel_id 一路往下傳給 execute_tools() → tool_registry 的
+    executor（例如 _exec_memory()），修正原本 memory_manager.search()
+    呼叫時少一個參數、導致參數整個錯位的問題（詳見 tool_registry.py
+    與 agent_router.py 的說明）。
+    """
     from core.ai.agent_router import execute_tools
-    return await execute_tools(route, user_id, query)
+    return await execute_tools(route, user_id, channel_id, query)

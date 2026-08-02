@@ -9,7 +9,10 @@ Modification():
 - 指令數量超過 FIELDS_PER_PAGE 時自動分頁，並顯示翻頁按鈕
 - 單頁時不顯示翻頁按鈕，維持原有簡潔 UI
 - 分頁 View 逾時後自動停用按鈕，避免殭屍互動
-- 移除 /hi 問候語中的裝飾符號，維持專案不使用 emoji 的規範
+- 移除 /hi 問候語中的裝飾符號，維持專案不使用 emoji 的規範。
+  修正：上一次的移除沒有清乾淨——訊息尾端仍留著顏文字
+  「Ciallo (∠·ω )⌒」，跟檔頭這句「已移除裝飾符號」的說明對不上，
+  本次一併清除，讓程式碼實際符合這裡宣告的規範。
 
 職責：
 
@@ -223,7 +226,7 @@ class General(commands.Cog):
     async def cmd_hi(self, interaction: discord.Interaction) -> None:
         name = get("ai.persona_name", "流螢")
         await interaction.response.send_message(
-            f"早ㄤ，{interaction.user.mention}！我是 {name}。Ciallo (∠·ω )⌒"
+            f"早ㄤ，{interaction.user.mention}！我是 {name}。"
         )
 
     # ── /hyw ──────────────────────

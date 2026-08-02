@@ -2,6 +2,13 @@
 core/ai/agent_router.py
 
 Modification():
+- execute_tools() 新增 channel_id 參數並傳給各 executor：
+  tool_registry._exec_memory() 原本呼叫 memory_manager.search() 時
+  少傳 channel_id（詳見 tool_registry.py 的說明），根源在於 executor
+  的呼叫鏈（context_manager → execute_tools → executor）從頭到尾
+  都沒有 channel_id 可用。修正需要沿著呼叫鏈往上補，本檔案是其中
+  一環：呼叫端 context_manager._get_tools() 已經拿得到 channel_id，
+  這裡只需要多接一個參數並原樣往下傳。
 - 將工具決策移交 tool_registry，路由器只負責模型與工具清單決策。
 - 改用 core.ai.models 的集中模型常數，移除本檔重複硬編碼模型名稱。
 - 保留純規則路由，不額外呼叫 AI，降低延遲與費用。
@@ -116,9 +123,10 @@ def _select_model(prompt: str) -> tuple[str, bool]:
 # ── Tool 執行 ──────────────────────
 
 async def execute_tools(
-    decision: RouteDecision,
-    user_id:  str,
-    query:    str,
+    decision:   RouteDecision,
+    user_id:    str,
+    channel_id: str,
+    query:      str,
 ) -> list[str]:
     """
     依決策執行工具，回傳 prompt 片段列表。
@@ -132,7 +140,7 @@ async def execute_tools(
     for name in decision.tools:
         executor = get_executor(name)
         if executor is not None:
-            tasks.append(executor(user_id, query))
+            tasks.append(executor(user_id, channel_id, query))
         else:
             logger.warning("[agent_router] 未知工具名稱: %s", name)
 

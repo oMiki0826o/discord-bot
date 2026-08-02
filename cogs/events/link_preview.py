@@ -3,6 +3,12 @@ cogs/events/link_preview.py
 
 Modification():
 
+- 修正「影片與縮圖重複顯示」：_build_embed() 原本不論是否已成功
+  下載影片附件，一律固定呼叫 set_image() 塞入縮圖，導致同一則訊息
+  同時出現「Embed 裡的靜態縮圖」與「下方可播放的完整影片」，兩者
+  畫面幾乎相同、形同重複。改為 _handle_link() 先嘗試取得影片附件，
+  再依「是否已有影片」決定 Embed 要不要放縮圖：有影片時縮圖讓給
+  影片本身、Embed 只留文字資訊；沒有影片時維持原本「縮圖 + 連結」。
 - 新增本檔案：取代舊有的 cogs/events/bilibili.py，整合多平台連結
   預覽與關鍵字摘要
 - 新增 Pinterest、Twitter/X、TikTok 支援，被動預覽清單擴充為
@@ -157,8 +163,11 @@ class LinkPreviewCog(commands.Cog):
 
         await self._maybe_summarize(preview)
 
-        embed = self._build_embed(preview)
+        # 影片附件成功時，Embed 就不再放縮圖（見 _build_embed 的
+        # has_video 參數說明），避免同一則訊息內「Embed 縮圖」與
+        # 「下方影片播放器」呈現幾乎相同的畫面，造成視覺上的重複。
         file  = await self._maybe_build_video_file(preview)
+        embed = self._build_embed(preview, has_video=file is not None)
 
         try:
             if file is not None:
@@ -219,8 +228,19 @@ class LinkPreviewCog(commands.Cog):
 
     # ── Embed 組裝 ──────────────────────
 
-    def _build_embed(self, preview: LinkPreview) -> discord.Embed:
-        """組裝 Embed：作者列（平台）、來源、統計、標題、說明、縮圖、原始連結。"""
+    def _build_embed(self, preview: LinkPreview, *, has_video: bool = False) -> discord.Embed:
+        """
+        組裝 Embed：作者列（平台）、來源、統計、標題、說明、縮圖、原始連結。
+
+        has_video 為 True 時（訊息會同時附上真正可播放的影片檔案），
+        Embed 刻意不再呼叫 set_image() 塞入縮圖：Discord 的 Bot 訊息
+        沒有辦法把上傳的影片附件「嵌進」rich embed 內部，只能讓附件與
+        Embed 一起顯示為同一則訊息中的兩個區塊。修正前不論是否已有
+        影片附件，Embed 一律固定放縮圖，導致同一則訊息同時出現「Embed
+        裡的靜態縮圖」與「下方可播放的完整影片」，兩者呈現的畫面幾乎
+        一樣，形同重複。改為影片存在時把縮圖讓給影片本身、Embed 只
+        負責文字資訊，沒有影片時才維持原本「縮圖 + 連結」的呈現方式。
+        """
         max_desc_chars = get_int("link_preview.embed_description_max_chars", 800)
 
         lines: list[str] = [preview.source_label, ""]
@@ -255,7 +275,7 @@ class LinkPreviewCog(commands.Cog):
             color       = preview.color,
         )
         embed.set_author(name=preview.platform_label)
-        if preview.thumbnail_url:
+        if preview.thumbnail_url and not has_video:
             embed.set_image(url=preview.thumbnail_url)
         embed.set_footer(text=preview.platform_label)
         return embed

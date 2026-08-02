@@ -1,7 +1,10 @@
 """
-bot/core/logging/discord_error_handler.py
+core/logging/discord_error_handler.py
 
 Modification():
+- 修正檔頭路徑：原本寫成 bot/core/logging/discord_error_handler.py，
+  但專案根目錄下沒有 bot/ 這層資料夾，實際路徑是
+  core/logging/discord_error_handler.py。
 
 - 新增 _is_noise()：過濾 ffmpeg、yt-dlp、asyncio、discord 已知例外，避免 Owner 收到無意義私訊
 - emit() 新增 bot.is_ready() 防護：bot 尚未就緒時不嘗試發送 DM

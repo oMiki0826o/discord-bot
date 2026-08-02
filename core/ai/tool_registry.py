@@ -2,6 +2,14 @@
 core/ai/tool_registry.py
 
 Modification():
+- 修正 _exec_memory() 呼叫 memory_manager.search() 時的參數錯位 bug：
+  原本 search(user_id, query, get_global_memories()) 只給 3 個位置
+  參數，但實際簽名是 (user_id, channel_id, query, global_mems) 共 4
+  個，導致 channel_id 被填成問題文字、問題文字被填成全域記憶清單、
+  global_mems 完全沒傳入。已改為 search(user_id, channel_id, query,
+  get_global_memories())。連帶將 ExecutorFn 型別與 _exec_summary /
+  _exec_profile 的參數統一補上 channel_id，讓三個 executor 維持
+  相同簽名（即使後兩者目前用不到 channel_id）。
 - 統一檔案註解格式，保留原有職責說明。
 
 修正（工具可插拔架構）：
@@ -25,8 +33,9 @@ logger = logging.getLogger("bot.tool_registry")
 
 # trigger：接收 (prompt, route_context)，回傳是否啟用此工具
 TriggerFn  = Callable[[str, dict], bool]
-# executor：實際執行工具邏輯，回傳要插入 prompt 的文字片段
-ExecutorFn = Callable[[str, str], Awaitable[str]]
+# executor：實際執行工具邏輯，參數為 (user_id, channel_id, query)，
+# 回傳要插入 prompt 的文字片段。
+ExecutorFn = Callable[[str, str, str], Awaitable[str]]
 
 
 @dataclass(frozen=True)
@@ -36,7 +45,8 @@ class ToolEntry:
 
     name      ：工具識別名稱（如 "memory"、"summary"、"profile"）
     trigger   ：判斷此次請求是否要啟用此工具
-    executor  ：實際執行邏輯，參數為 (user_id, query)，回傳 prompt 片段
+    executor  ：實際執行邏輯，參數為 (user_id, channel_id, query)，
+                回傳 prompt 片段
     priority  ：數字越小越優先，決定多個工具同時觸發時的組裝順序
     """
     name:     str
@@ -89,11 +99,24 @@ def _trigger_profile(prompt: str, ctx: dict) -> bool:
 # ── 各工具的執行邏輯 ──────────────────────
 # 內部 import 避免循環依賴（與原 agent_router.execute_tools 行為一致）。
 
-async def _exec_memory(user_id: str, query: str) -> str:
+async def _exec_memory(user_id: str, channel_id: str, query: str) -> str:
+    """
+    修正：原本呼叫 search(user_id, query, get_global_memories())，
+    但 memory_manager.search() 實際簽名是
+    (user_id, channel_id, query, global_mems)——三個位置參數對應到
+    四個參數，等於把 query 誤塞進 channel_id、把 get_global_memories()
+    回傳的清單誤塞進 query，global_mems 反而完全沒有傳入。由於
+    select_tools() 的觸發條件相當寬鬆（訊息超過 10 字就會觸發，見
+    _trigger_memory），這個錯位在大多數對話中都會發生，且一旦這裡
+    傳回非空內容，prompt_builder 就會跳過 context_manager 那條正確的
+    記憶路徑（見 prompt_builder.py 的「若 Tool 已注入相關記憶則跳過」
+    邏輯），等於用參數錯位、幾乎沒在比對正確頻道與問題的結果，蓋掉了
+    原本正確的記憶內容。
+    """
     try:
         from core.ai.memory_manager import search
         from core.ai.user_context import get_global_memories
-        bundle = search(user_id, query, get_global_memories())
+        bundle = search(user_id, channel_id, query, get_global_memories())
         if bundle.memories:
             lines = [f"- [{kw}] '{c}'" for kw, c, _ in bundle.memories[:5]]
             return "=== 工具：相關記憶 ===\n" + "\n".join(lines)
@@ -102,7 +125,8 @@ async def _exec_memory(user_id: str, query: str) -> str:
     return ""
 
 
-async def _exec_summary(user_id: str, query: str) -> str:
+async def _exec_summary(user_id: str, channel_id: str, query: str) -> str:
+    """channel_id / query 目前用不到，僅為符合共用的 ExecutorFn 簽名而保留。"""
     try:
         from core.ai.memory_manager import get_summary_text
         s = get_summary_text(user_id)
@@ -112,7 +136,8 @@ async def _exec_summary(user_id: str, query: str) -> str:
     return ""
 
 
-async def _exec_profile(user_id: str, query: str) -> str:
+async def _exec_profile(user_id: str, channel_id: str, query: str) -> str:
+    """channel_id / query 目前用不到，僅為符合共用的 ExecutorFn 簽名而保留。"""
     try:
         from core.ai.user_context import profile_to_prompt
         return profile_to_prompt(user_id)

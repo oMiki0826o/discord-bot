@@ -2,15 +2,21 @@
 tests/test_abuse_guard.py
 
 Modification():
-- 統一檔案註解格式，保留原有職責說明。
+- 修正 _reset()：原本 monkeypatch.setattr(abuse_guard, "_MAX_REQUESTS", ...)
+  等三行，設定的是已經不存在的模組層級常數——abuse_guard.py 早已改為
+  每次呼叫 check_and_record() 時透過 get_int() 即時讀取
+  settings.json（見 abuse_guard.py 的「所有閾值...可熱更新」設計說明），
+  模組內根本沒有 _MAX_REQUESTS / _WINDOW_SECONDS / _RESTRICT_MINUTES
+  這幾個屬性了。monkeypatch.setattr 對不存在的屬性一律會拋出
+  AttributeError，導致這個測試檔案的 5 個測試全數失敗。
+  改為直接攔截 abuse_guard.get_int（check_and_record 內實際呼叫的
+  名稱），依 key 回傳測試指定的固定值，其餘 key 回退給預設值，
+  不需要依賴 settings.json 的實際內容。
 
 測試 core.ai.abuse_guard：
 - 滑動視窗計數與門檻判斷
 - 觸發限制後的拒絕訊息與 is_restricted()
 - clear_restriction() 手動解除
-
-直接 monkeypatch 模組內的門檻常數（_MAX_REQUESTS 等），
-不透過環境變數，避免受其他測試的 import 順序影響。
 """
 
 from __future__ import annotations
@@ -19,11 +25,19 @@ import core.ai.abuse_guard as abuse_guard
 
 
 def _reset(monkeypatch, max_requests=3, window=60, restrict_minutes=5):
-    """重設滑動視窗狀態與門檻，確保測試之間互不影響。"""
+    """重設滑動視窗狀態，並固定 get_int() 讀到的門檻值，確保測試互不影響。"""
     abuse_guard._request_log.clear()
-    monkeypatch.setattr(abuse_guard, "_MAX_REQUESTS", max_requests)
-    monkeypatch.setattr(abuse_guard, "_WINDOW_SECONDS", window)
-    monkeypatch.setattr(abuse_guard, "_RESTRICT_MINUTES", restrict_minutes)
+
+    fixed_values = {
+        "ai.abuse_max_requests":    max_requests,
+        "ai.abuse_window_seconds": window,
+        "ai.abuse_restrict_minutes": restrict_minutes,
+    }
+
+    def _fake_get_int(key: str, default: int = 0) -> int:
+        return fixed_values.get(key, default)
+
+    monkeypatch.setattr(abuse_guard, "get_int", _fake_get_int)
 
 
 def test_requests_within_threshold_are_allowed(fresh_db, monkeypatch):

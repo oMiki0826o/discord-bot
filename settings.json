@@ -137,6 +137,7 @@
     "max_embeds_per_message": 3,
     "cache_size": 200,
     "request_timeout_seconds": 10,
+    "dead_host_cooldown_seconds": 300,
     "embed_description_max_chars": 800,
     "attach_video": true,
     "video_max_upload_mb": 8,
@@ -149,12 +150,13 @@
     "summary_fail_message": "無法擷取這個網址的內容，可能是網站封鎖爬取或內容非純文字頁面。",
     "instagram_proxy_hosts": [
       "ddinstagram.com",
+      "instagramez.com",
       "kkinstagram.com",
       "d.ddinstagram.com"
     ],
     "threads_proxy_hosts": [
-      "www.fixthreads.net",
-      "www.vxthreads.net"
+      "vxthreads.net",
+      "viewthreads.com"
     ],
     "twitter_proxy_hosts": [
       "fxtwitter.com",

@@ -2,16 +2,42 @@
 core/ai/file_parser/document_parser.py
 
 Modification():
-- 統一檔案註解格式，保留原有職責說明。
 
-修正（文件類解析）：
-- 涵蓋 pdf / docx / xlsx / pptx 文字提取，統一輸出純文字
-- 本模組維持同步介面；CPU 密集的執行緒池調度統一由 __init__.py 的
-  parse() 透過 asyncio.to_thread 處理，所有 parser（含本模組）保持
-  相同的同步呼叫慣例，避免雙重包裝
-- 各格式皆為可選依賴（pypdf / python-docx / openpyxl / python-pptx），
-  缺少對應套件時回傳明確 error，不中斷整體流程
-- PDF 僅提取文字層；掃描型 PDF（無文字層）回傳提示，不做 OCR（OCR 屬未來規劃）
+- 全面改用 markitdown 套件（Microsoft 開源，pip install markitdown）
+  取代原本 pypdf / python-docx / openpyxl / python-pptx 四套各自獨立
+  的文字提取邏輯：
+
+  1. 修正既有 bug：requirements.txt 原本寫的是 pypdf2（安裝後的模組
+     名稱是 PyPDF2），但本檔案實際 import 的是 pypdf（完全不同的
+     套件，需另外安裝）。實測建立乾淨的虛擬環境、依 requirements.txt
+     安裝、執行 `import pypdf`，結果是 ModuleNotFoundError——代表 PDF
+     解析這條路徑一直靜默失敗，永遠落入下方「缺少套件」的錯誤分支。
+     改用 markitdown 後不再需要這個容易寫錯名稱的相依套件。
+  2. 四種格式原本各自維護一套提取程式碼（合計約 150 行），現在統一
+     呼叫 MarkItDown().convert()，程式碼量大幅減少。已實際安裝
+     markitdown 0.1.6 並用 docx / xlsx / pptx / pdf 測試檔驗證：
+     輸出的 result.text_content 為結構化 Markdown（標題轉成
+     # heading、表格轉成正規 Markdown 表格），相較舊版 xlsx 解析器
+     逐列輸出「儲存格 | 儲存格」的純文字堆疊，資訊密度更高、
+     格式雜訊更少，有助於降低 AI 閱讀文件時的 token 消耗。
+  3. 額外受益：markitdown 透過 xls extra 同時支援舊版 .xls，原本
+     一律回絕「請轉換為 .xlsx」，現在可以直接解析；.doc / .ppt 仍
+     超出 markitdown 的支援範圍（僅涵蓋 Office Open XML 格式），
+     維持原本的引導訊息，請使用者自行轉換。
+- 移除不再使用的 _MAX_XLSX_ROWS（原本以列數限制 Excel 讀取範圍；
+  現在改由 markitdown 統一輸出後，交給既有的 truncate() 依字元數
+  把關即可，避免兩套截斷邏輯同時存在造成混淆）。
+- 仍維持同步呼叫介面：CPU 密集的轉換工作統一由 __init__.py 的
+  parse() 透過 asyncio.to_thread 排程至執行緒池，本模組不自行
+  處理執行緒，與其餘 parser 保持一致的呼叫慣例。
+
+職責：
+- 涵蓋 pdf / docx / xlsx / xls / pptx 文字提取，統一輸出 Markdown
+  格式的純文字內容
+- markitdown 為可選依賴，缺少對應 extra 時回傳明確 error，不中斷
+  整體檔案解析流程
+- PDF 僅提取文字層；掃描型 PDF（無文字層）或內容為空時回傳明確
+  提示，不做 OCR（OCR 屬未來規劃）
 """
 
 from __future__ import annotations
@@ -24,8 +50,16 @@ from core.ai.file_parser.summary_builder import truncate
 
 logger = logging.getLogger("bot.file_parser.document")
 
-# Excel 單一工作表最大列數，避免大型試算表耗盡記憶體
-_MAX_XLSX_ROWS = 200
+# markitdown 實際涵蓋的格式（皆需安裝對應 extra，見 requirements.txt）。
+_MARKITDOWN_EXTS = frozenset({".pdf", ".docx", ".xlsx", ".xls", ".pptx"})
+
+# .doc / .ppt 為舊版二進位格式，超出 markitdown 的支援範圍（僅涵蓋
+# Office Open XML），未來若要支援需額外整合 antiword / LibreOffice
+# 之類的轉檔工具，目前仍請使用者自行轉換為新格式。
+_UNSUPPORTED_LEGACY: dict[str, str] = {
+    ".doc": "不支援舊版 .doc 格式，請轉換為 .docx",
+    ".ppt": "不支援舊版 .ppt 格式，請轉換為 .pptx",
+}
 
 
 # ── 主要入口 ──────────────────────
@@ -47,32 +81,16 @@ def parse(path: Path, filename: str, size_bytes: int) -> ParsedFile:
 # ── 格式分派 ──────────────────────
 
 def _dispatch(path: Path, filename: str, ext: str, size_bytes: int) -> ParsedFile:
-    if ext == ".pdf":
-        return _parse_pdf(path, filename, size_bytes)
-    if ext == ".docx":
-        return _parse_docx(path, filename, size_bytes)
-    if ext == ".doc":
+    if ext in _MARKITDOWN_EXTS:
+        return _parse_with_markitdown(path, filename, ext, size_bytes)
+
+    if ext in _UNSUPPORTED_LEGACY:
         return ParsedFile(
             filename=filename, extension=ext,
             category="document", size_bytes=size_bytes,
-            error="不支援舊版 .doc 格式，請轉換為 .docx",
+            error=_UNSUPPORTED_LEGACY[ext],
         )
-    if ext == ".xlsx":
-        return _parse_xlsx(path, filename, size_bytes)
-    if ext == ".xls":
-        return ParsedFile(
-            filename=filename, extension=ext,
-            category="document", size_bytes=size_bytes,
-            error="不支援舊版 .xls 格式，請轉換為 .xlsx",
-        )
-    if ext == ".pptx":
-        return _parse_pptx(path, filename, size_bytes)
-    if ext == ".ppt":
-        return ParsedFile(
-            filename=filename, extension=ext,
-            category="document", size_bytes=size_bytes,
-            error="不支援舊版 .ppt 格式，請轉換為 .pptx",
-        )
+
     return ParsedFile(
         filename=filename, extension=ext,
         category="document", size_bytes=size_bytes,
@@ -80,150 +98,36 @@ def _dispatch(path: Path, filename: str, ext: str, size_bytes: int) -> ParsedFil
     )
 
 
-# ── PDF ──────────────────────
+# ── markitdown 統一轉換 ──────────────────────
 
-def _parse_pdf(path: Path, filename: str, size_bytes: int) -> ParsedFile:
+def _parse_with_markitdown(path: Path, filename: str, ext: str, size_bytes: int) -> ParsedFile:
     try:
-        from pypdf import PdfReader
+        from markitdown import MarkItDown
     except ImportError:
         return ParsedFile(
-            filename=filename, extension=".pdf",
+            filename=filename, extension=ext,
             category="document", size_bytes=size_bytes,
-            error="缺少 pypdf 套件，無法解析 PDF",
+            error="缺少 markitdown 套件，無法解析文件",
         )
 
-    reader = PdfReader(str(path))
-    pages  = reader.pages
-    texts:  list[str] = []
+    # 每次呼叫建立獨立實例（而非重用模組級單例）：markitdown 官方文件
+    # 未明確保證 convert() 在多執行緒併發呼叫同一實例時的安全性，
+    # 而本函式會被排程至執行緒池平行執行；建立實例的成本很低，
+    # 不足以影響效能，換取明確不共享狀態較為穩妥。
+    result    = MarkItDown().convert(str(path))
+    full_text = (result.text_content or "").strip()
 
-    for page in pages:
-        text = page.extract_text() or ""
-        if text.strip():
-            texts.append(text)
-
-    full_text = "\n\n".join(texts)
-
-    if not full_text.strip():
-        # 沒有文字層 → 可能是掃描 PDF，OCR 屬未來規劃，先明確告知
+    if not full_text:
         return ParsedFile(
-            filename=filename, extension=".pdf",
+            filename=filename, extension=ext,
             category="document", size_bytes=size_bytes,
-            content=f"[此 PDF 共 {len(pages)} 頁，未偵測到可提取的文字層，可能為掃描檔]",
+            content=f"[{ext} 檔案未提取到可用文字內容，若為掃描型 PDF 或純圖片投影片，屬已知限制（未內建 OCR）]",
             error=None,
         )
 
     content, truncated = truncate(full_text)
     return ParsedFile(
-        filename=filename, extension=".pdf",
-        category="document", size_bytes=size_bytes,
-        content=f"[共 {len(pages)} 頁]\n\n{content}",
-        truncated=truncated,
-    )
-
-
-# ── DOCX ──────────────────────
-
-def _parse_docx(path: Path, filename: str, size_bytes: int) -> ParsedFile:
-    try:
-        import docx
-    except ImportError:
-        return ParsedFile(
-            filename=filename, extension=".docx",
-            category="document", size_bytes=size_bytes,
-            error="缺少 python-docx 套件，無法解析 Word 文件",
-        )
-
-    doc = docx.Document(str(path))
-
-    parts: list[str] = [p.text for p in doc.paragraphs if p.text.strip()]
-
-    # 表格內容也納入（Word 報告常見表格資料）
-    for table in doc.tables:
-        for row in table.rows:
-            cells = [c.text.strip() for c in row.cells]
-            if any(cells):
-                parts.append(" | ".join(cells))
-
-    full_text = "\n".join(parts)
-    content, truncated = truncate(full_text)
-    return ParsedFile(
-        filename=filename, extension=".docx",
+        filename=filename, extension=ext,
         category="document", size_bytes=size_bytes,
         content=content, truncated=truncated,
-    )
-
-
-# ── XLSX ──────────────────────
-
-def _parse_xlsx(path: Path, filename: str, size_bytes: int) -> ParsedFile:
-    try:
-        from openpyxl import load_workbook
-    except ImportError:
-        return ParsedFile(
-            filename=filename, extension=".xlsx",
-            category="document", size_bytes=size_bytes,
-            error="缺少 openpyxl 套件，無法解析 Excel 檔案",
-        )
-
-    # read_only=True：避免整份工作表載入記憶體
-    wb = load_workbook(str(path), read_only=True, data_only=True)
-
-    sections:  list[str] = []
-    truncated = False
-
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        sections.append(f"--- 工作表：{sheet_name} ---")
-        row_count = 0
-        for row in ws.iter_rows(max_row=_MAX_XLSX_ROWS, values_only=True):
-            row_count += 1
-            cells = [str(c) if c is not None else "" for c in row]
-            sections.append(" | ".join(cells))
-        # read_only 模式 max_row 可能不可靠，故以實際讀取列數判斷是否截斷
-        if row_count >= _MAX_XLSX_ROWS:
-            truncated = True
-            sections.append(f"[此工作表僅顯示前 {_MAX_XLSX_ROWS} 列]")
-
-    wb.close()
-
-    full_text = "\n".join(sections)
-    content, extra_cut = truncate(full_text)
-    return ParsedFile(
-        filename=filename, extension=".xlsx",
-        category="document", size_bytes=size_bytes,
-        content=content, truncated=truncated or extra_cut,
-    )
-
-
-# ── PPTX ──────────────────────
-
-def _parse_pptx(path: Path, filename: str, size_bytes: int) -> ParsedFile:
-    try:
-        from pptx import Presentation
-    except ImportError:
-        return ParsedFile(
-            filename=filename, extension=".pptx",
-            category="document", size_bytes=size_bytes,
-            error="缺少 python-pptx 套件，無法解析 PowerPoint 檔案",
-        )
-
-    prs   = Presentation(str(path))
-    parts: list[str] = []
-
-    for i, slide in enumerate(prs.slides, start=1):
-        slide_texts = [
-            shape.text_frame.text
-            for shape in slide.shapes
-            if shape.has_text_frame and shape.text_frame.text.strip()
-        ]
-        if slide_texts:
-            parts.append(f"--- 第 {i} 頁 ---\n" + "\n".join(slide_texts))
-
-    full_text = "\n\n".join(parts)
-    content, truncated = truncate(full_text)
-    return ParsedFile(
-        filename=filename, extension=".pptx",
-        category="document", size_bytes=size_bytes,
-        content=f"[共 {len(prs.slides)} 頁]\n\n{content}",
-        truncated=truncated,
     )

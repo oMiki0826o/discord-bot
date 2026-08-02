@@ -2,6 +2,11 @@
 core/ai/ranker.py
 
 Modification():
+- 修正 optimize_context()：移除 recent[-6:] 這個寫死且無設定可調的
+  二次截斷。呼叫端 memory_manager.search() 已用 ai.recent_message_limit
+  （settings.json 可調整，預設 12）限制過筆數，這裡再砍一次固定的
+  「6」，會讓使用者調整 recent_message_limit 之後毫無效果——查了半天
+  設定卻永遠只看得到 6 筆最近對話。改為直接信任呼叫端傳入的筆數。
 - 對記憶與歷史訊息依相關性排序。
 - 增加 query / content / importance 的型別防護，避免非字串資料造成 runtime crash。
 - 保留詞彙交集加權排序，避免無關但高 importance 的記憶過度前排。
@@ -104,10 +109,18 @@ def optimize_context(
 
     memories → rank_memories（相關性 + importance 加權排序）
     messages → rank_messages（相關性排序）
-    recent   → 直接取最後 6 筆，維持時間正序，不重新排序
+    recent   → 直接沿用呼叫端傳入的內容，維持時間正序，不重新排序、
+               也不在此再次截斷。
+
+    修正：原本這裡固定寫死 recent[-6:]，但呼叫端
+    memory_manager.search() 早已用 ai.recent_message_limit（settings.json
+    可調整，預設 12）限制過 recent 的筆數；這裡又用另一個沒有對應設定、
+    寫死在程式碼裡的「6」重新砍一次，等於使用者把 recent_message_limit
+    調成 12，實際能用到的「最近對話」卻永遠只有 6 筆，設定值形同虛設。
+    直接信任呼叫端已經處理過筆數限制，不在這裡重複、不一致地再限制一次。
     """
     return {
         "memories": rank_memories(query, memories),
         "messages": rank_messages(query, messages),
-        "recent":   list(recent[-6:]),
+        "recent":   list(recent),
     }

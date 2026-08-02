@@ -1,10 +1,13 @@
 # ── 環境變數 ──────────────────────
 .env
+.env.local
 
 # ── Python ──────────────────────
 __pycache__/
 *.pyc
 .venv/
+venv/
+*.egg-info/
 
 # ── 測試與靜態檢查快取（pyproject.toml: pytest / ruff / mypy）──────────────────────
 .pytest_cache/
@@ -19,5 +22,11 @@ database/logs/
 database/ai/*.db
 database/prompts/active.txt
 
-# ── macOS ──────────────────────
+# ── 作業系統 ──────────────────────
 .DS_Store
+Thumbs.db
+
+# ── 編輯器 / IDE ──────────────────────
+.vscode/
+.idea/
+*.swp

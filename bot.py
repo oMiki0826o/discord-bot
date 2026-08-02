@@ -1,33 +1,35 @@
 """
-bot/bot.py
+bot.py
 
 Modification():
 
-- 將前綴改為動態讀取 settings.json，避免改設定後仍需重啟。
-- 保留 setup_hook 的初始化、Cog 載入、Slash 同步與 ready_event 通知流程。
+- 修正重複定義：setup_hook() / on_ready() / sync_slash() /
+  refresh_presence() / close() 先前在 FireflyBot 類別內各自被完整定義了
+  兩次（內容逐字相同），推測是先前編輯時重複貼上造成。Python 類別本體中
+  同名方法第二次定義會靜默覆蓋第一次，因此第一份等同永遠不會執行的死
+  程式碼；問題不是「現在跑起來會壞」，而是「未來只改到其中一份時，
+  改動會悄悄失效」。已移除重複的區塊，每個方法只保留一份。
+- 前綴改為動態讀取 settings.json，避免改設定後仍需重啟。
+- setup_hook 保留初始化、Cog 載入、Slash 同步與 ready_event 通知流程。
 - close() 維持優雅關閉，關機報告逾時或失敗時不阻塞 Discord 連線關閉。
 - KeyboardInterrupt 僅輸出簡短關閉訊息，避免終端出現不必要 traceback。
+- CustomCommandTree（繼承 app_commands.CommandTree）：覆寫 on_error()，
+  統一攔截 slash command 的 CheckFailure / MissingPermissions 等例外並
+  回覆使用者，取代原本「例外印至 discord.app_commands.tree logger，
+  但使用者看到 interaction 無回應」的行為。say / typing / embed /
+  webhook 等指令改用 default_permissions（Discord 側前置攔截），
+  CustomCommandTree 仍作為最後防線確保任何 CheckFailure 都能給使用者
+  可讀的中文回饋。
+- on_command_error 事件監聽器（prefix command 錯誤處理）：
+  CommandNotFound 靜默忽略（一般訊息剛好含前綴字元時會觸發，非錯誤）；
+  MissingRequiredArgument 顯示用法提示；NotOwner / MissingPermissions
+  顯示權限不足訊息；其餘例外重新拋出，交由 DiscordErrorHandler 處理
+  並通知 Owner。
 
-- 新增 CustomCommandTree（繼承 app_commands.CommandTree）：
-  覆寫 on_error()，統一攔截 slash command 的 CheckFailure / MissingPermissions
-  等例外並回覆使用者，取代原本「例外印至 discord.app_commands.tree logger
-  但使用者看到 interaction 無回應」的行為。
-  say / typing / embed / webhook 等指令改用 default_permissions（Discord
-  側前置攔截），但 CustomCommandTree 仍作為最後防線確保任何 CheckFailure
-  都能給使用者可讀的中文回饋，而不是「此互動未能回應」。
-
-- 新增 on_command_error 事件監聽器（prefix command 錯誤處理）：
-  CommandNotFound → 靜默忽略（使用者輸入的一般訊息包含前綴時會觸發，
-    不應視為錯誤）。
-  MissingRequiredArgument → 顯示用法提示（原本印至 discord.ext.commands.bot
-    logger 但使用者無回應）。
-  NotOwner / MissingPermissions → 顯示權限不足訊息。
-  其餘例外 → 重新拋出，交由 DiscordErrorHandler 處理並通知 Owner。
-
-Description():
-
-- FireflyBot 是專案的 Discord Bot 入口，負責建立 intents、載入擴充模組、
-  同步 Slash Commands、套用 presence，並管理啟動與關閉生命週期。
+本檔是專案的 Discord Bot 入口。FireflyBot 負責建立 intents、載入擴充
+模組、同步 Slash Commands、套用 presence，並管理啟動與關閉生命週期；
+CustomCommandTree 與 on_command_error 則統一處理 Slash／前綴指令的
+全域錯誤回饋。
 """
 
 from __future__ import annotations
@@ -349,100 +351,6 @@ class FireflyBot(commands.Bot):
             error,
             exc_info=error,
         )
-
-    # ── sync_slash（供管理指令手動呼叫） ──────────────────────
-
-    async def sync_slash(self, guild: discord.Guild | None = None) -> list:
-        """手動同步 Slash Commands，供 $slash / $slash_guild 指令呼叫。"""
-        if guild:
-            self.tree.copy_global_to(guild=guild)
-            synced = await self.tree.sync(guild=guild)
-        else:
-            synced = await self.tree.sync()
-        logger.info("Slash Commands 已同步 | %d 個指令", len(synced))
-        return synced
-
-    # ── refresh_presence（供 $settings reload 呼叫） ──────────────────────
-
-    async def refresh_presence(self) -> None:
-        """從 settings.json 重新套用 Discord 狀態。"""
-        activity, status = _build_presence()
-        await self.change_presence(activity=activity, status=status)
-        logger.info("Bot 狀態已重新套用")
-
-    # ── close（優雅關閉） ──────────────────────
-
-    async def close(self) -> None:
-        logger.info("Bot 關閉中...")
-
-        # ── 發送關機報告（限時 10 秒，避免卡死） ──────────────────────
-        log_mgr = getattr(self, "log_manager", None)
-        if log_mgr is not None:
-            try:
-                await asyncio.wait_for(log_mgr.send_shutdown_report(), timeout=10.0)
-            except TimeoutError:
-                logger.warning("關機報告發送逾時，繼續關閉")
-            except Exception:
-                logger.exception("關機報告發送失敗")
-
-        await super().close()
-        logger.info("Bot 已關閉")
-
-    # ── setup_hook ──────────────────────
-
-    async def setup_hook(self) -> None:
-        logger.info("setup_hook 開始")
-
-        # ── 同步預載（在執行緒中執行，不阻塞 event loop） ──────────────────────
-        await asyncio.to_thread(initialize)
-
-        # ── 預熱核心模組 ──────────────────────
-        results = run_warmup()
-        failed  = [r for r in results if not r.success]
-        if failed:
-            logger.warning("預熱失敗模組: %s", [r.module for r in failed])
-
-        # ── 掛載 Discord 錯誤通報 handler ──────────────────────
-        self.log_manager.attach_bot(self)
-
-        # ── 載入所有 Cog extension ──────────────────────
-        loaded, errors = await self._loader.load_all(
-            packages  = list(config.EXTENSION_PACKAGES),
-            blacklist = config.EXTENSION_BLACKLIST,
-            excluded  = config.EXCLUDED_DIRS,
-        )
-        logger.info("Cog 載入完成 | 成功=%d 失敗=%d", len(loaded), len(errors))
-
-        # ── 自動同步 Slash Commands ──────────────────────
-        try:
-            synced = await self.tree.sync()
-            logger.info("Slash Commands 同步完成 | 全域指令 %d 個", len(synced))
-        except Exception:
-            logger.exception("Slash Commands 同步失敗")
-
-        # ── 通知所有等待初始化的背景任務 ──────────────────────
-        self.ready_event.set()
-        logger.info("setup_hook 完成")
-
-    # ── on_ready ──────────────────────
-
-    async def on_ready(self) -> None:
-        assert self.user is not None
-
-        startup_elapsed = time.monotonic() - self._startup_time
-        user_count      = sum(g.member_count or 0 for g in self.guilds)
-
-        # ── 啟動摘要 ──────────────────────
-        separator = "=" * 48
-        logger.info(separator)
-        logger.info("Bot 啟動完成")
-        logger.info("  帳號          : %s (%s)", self.user, self.user.id)
-        logger.info("  Python        : %s", platform.python_version())
-        logger.info("  discord.py    : %s", discord.__version__)
-        logger.info("  伺服器數      : %d", len(self.guilds))
-        logger.info("  使用者數      : %d", user_count)
-        logger.info("  啟動耗時      : %.2f 秒", startup_elapsed)
-        logger.info(separator)
 
     # ── sync_slash（供管理指令手動呼叫） ──────────────────────
 
