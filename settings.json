@@ -140,7 +140,6 @@
     "dead_host_cooldown_seconds": 300,
     "embed_description_max_chars": 800,
     "attach_video": true,
-    "video_max_upload_mb": 8,
     "bilibili_fetch_video": true,
     "summary_trigger_min_chars": 60,
     "summary_max_chars": 200,

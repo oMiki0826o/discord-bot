@@ -145,7 +145,6 @@ _DEFAULTS: dict[str, Any] = {
     "link_preview.dead_host_cooldown_seconds":  300,
     "link_preview.embed_description_max_chars": 800,
     "link_preview.attach_video":                True,
-    "link_preview.video_max_upload_mb":         8,
     "link_preview.bilibili_fetch_video":        True,
     "link_preview.summary_trigger_min_chars":   60,
     "link_preview.summary_max_chars":           200,

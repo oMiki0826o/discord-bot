@@ -8,6 +8,18 @@ core/link_preview/base.py
 
 Modification():
 
+- 新增 embed_video_link 欄位：與 video_url（供下載用的直接影片檔案
+  網址）用途不同——這是一個「修復網域」頁面網址（例如
+  https://vxbilibili.com/video/BVxxx），設計上要當作訊息的純文字
+  內容送出（不加 <> 角括號），讓 Discord 自己的爬蟲原生解析出可
+  播放的影片嵌入，而不是由我們自己下載影片位元組再重新上傳成
+  附件。參考真實案例 FixTweetBot（一款成熟的公開 Discord
+  連結修復 Bot）：它完全不會下載影片，只送出修復後的連結文字，
+  讓 Discord 原生處理，這樣沒有 Discord 附件的檔案大小上限問題，
+  也不需要消耗頻寬下載＋上傳。
+  video_url 欄位仍保留，供未來若有下載需求的功能（例如日後的下載
+  指令）使用，但目前的被動預覽渲染路徑改用 embed_video_link，
+  不再呼叫下載。
 - 新增本檔案：作為 core.link_preview 的資料層基礎，讓所有平台
   擷取器共用相同的輸出型別，新增平台時不需修改 Cog 層的組裝邏輯。
 - summary 欄位設計為可選且可後設置（Optional, mutable）：
@@ -59,7 +71,8 @@ class LinkPreview:
     author:         str | None     = None
     description:    str | None     = None
     thumbnail_url:  str | None     = None
-    video_url:      str | None     = None
+    video_url:      str | None     = None   # 供下載用的直接影片檔案網址（目前渲染路徑未使用，保留供未來下載類功能使用）
+    embed_video_link: str | None   = None   # 修復網域頁面網址，當作純文字內容送出可讓 Discord 原生嵌入播放
     stats:          list[LinkStat] = field(default_factory=list)
     color:          int            = 0x5865F2  # Discord blurple 預設色
 

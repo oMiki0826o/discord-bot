@@ -3,6 +3,12 @@ core/link_preview/tiktok.py
 
 Modification():
 
+- 修正「影片截取」作法：偵測到影片時，不再交由 Cog 層下載 og:video
+  網址重新上傳，改為把「本次成功回應的代理網址本身」設為
+  embed_video_link，交由 Cog 層當作純文字內容送出，讓 Discord 自己
+  的爬蟲原生嵌入播放，沒有 Discord 附件的檔案大小上限問題。參考
+  真實案例 FixTweetBot（一款成熟的公開 Discord 連結修復 Bot）：
+  它從頭到尾都不下載影片，只送出修復後的連結文字。
 - 新增「候選網域全部失敗時，最後嘗試原始網址本身」的備援，與
   instagram.py／threads.py／twitter.py 統一做法：把解析出的原始
   hostname 併入候選清單最後一位。TikTok 短連結（vt.tiktok.com /
@@ -17,7 +23,8 @@ Modification():
 
 - 將 TikTok 影片連結轉換為 LinkPreview
 - 改用社群維運的公開代理服務取得完整的 og:title /
-  og:description / og:image / og:video
+  og:description / og:image / og:video，偵測到影片時改用
+  embed_video_link 讓 Discord 原生嵌入播放
 - 透過 core.link_preview.fallback 依序嘗試多個候選網域，候選清單
   由 settings.json 的 link_preview.tiktok_proxy_hosts 控制，全部
   失敗時退回原始網址
@@ -72,14 +79,17 @@ async def extract(url: str) -> LinkPreview | None:
         logger.warning("[TikTok] 未取得任何 og 標籤 url=%s", url)
         return None
 
+    video = tags.get("video")
+
     return LinkPreview(
-        platform       = "tiktok",
-        platform_label = "TikTok",
-        source_label   = f"via {response.url.host}",
-        url            = url,
-        title          = tags.get("title"),
-        description    = tags.get("description"),
-        thumbnail_url  = tags.get("image"),
-        video_url      = tags.get("video"),
-        color          = 0x000000,
+        platform         = "tiktok",
+        platform_label   = "TikTok",
+        source_label     = f"via {response.url.host}",
+        url              = url,
+        title            = tags.get("title"),
+        description      = tags.get("description"),
+        thumbnail_url    = tags.get("image"),
+        video_url        = video,
+        embed_video_link = str(response.url) if video else None,
+        color            = 0x000000,
     )

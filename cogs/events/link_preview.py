@@ -3,12 +3,26 @@ cogs/events/link_preview.py
 
 Modification():
 
-- 修正「影片與縮圖重複顯示」：_build_embed() 原本不論是否已成功
-  下載影片附件，一律固定呼叫 set_image() 塞入縮圖，導致同一則訊息
-  同時出現「Embed 裡的靜態縮圖」與「下方可播放的完整影片」，兩者
-  畫面幾乎相同、形同重複。改為 _handle_link() 先嘗試取得影片附件，
-  再依「是否已有影片」決定 Embed 要不要放縮圖：有影片時縮圖讓給
-  影片本身、Embed 只留文字資訊；沒有影片時維持原本「縮圖 + 連結」。
+- 修正「影片截取」的核心作法：原本影片網址存在時會呼叫
+  download_if_within_limit() 下載影片位元組、包裝成 Discord 附件
+  重新上傳，這個做法受限於 link_preview.video_max_upload_mb（原預設
+  8MB），影片稍微長一點或畫質高一點就會下載失敗，靜默退回只顯示
+  縮圖；下載＋上傳也消耗 Bot 自己的頻寬。參考真實案例 FixTweetBot
+  （一款成熟的公開 Discord 連結修復 Bot，支援數十種平台）的做法：
+  它完全不下載影片，只是把連結網域替換成修復網域（vxbilibili.com、
+  fxtwitter.com 等），送出這個修復後的網址純文字，讓 Discord 自己
+  的爬蟲原生解析出可播放的影片嵌入。改為 preview.embed_video_link
+  存在時，將這個網址一併作為訊息的純文字內容送出（不加 <> 角括號，
+  Discord 才會對其產生原生嵌入），與我們自己組的 Embed 一起顯示：
+  我們的 Embed 負責標題／統計／說明等文字資訊，Discord 原生嵌入
+  負責實際的影片播放，兩者呈現內容不同，不是重複顯示。沒有檔案
+  大小上限問題，也不需要下載＋上傳。
+- 移除 _maybe_build_video_file()：不再需要下載影片，改由
+  embed_video_link 讓 Discord 原生處理。core.link_preview.video
+  對應的下載邏輯已一併簡化（見該檔案的 Modification 說明）。
+- _build_embed() 的 has_video 判斷依據改為「preview.embed_video_link
+  是否存在」，而非「是否已成功下載影片檔案」，其餘行為不變：
+  有影片時縮圖讓給 Discord 原生嵌入本身、Embed 只留文字資訊。
 - 新增本檔案：取代舊有的 cogs/events/bilibili.py，整合多平台連結
   預覽與關鍵字摘要
 - 新增 Pinterest、Twitter/X、TikTok 支援，被動預覽清單擴充為
@@ -27,16 +41,14 @@ Modification():
   點擊（embed.url），內文中沒有任何明確的連結文字，使用者容易
   忽略標題其實可以點擊。現在固定在內文末端加上一行 Markdown
   超連結，來源與原始網址一目了然
-- 配合 core.link_preview.video.download_if_within_limit() 的新
-  回傳型別（緩衝區, 副檔名），_maybe_build_video_file() 不再寫死
-  .mp4 附件檔名
 
 職責：
 
 - 監聽伺服器訊息，涵蓋兩種獨立功能：
   1. 被動預覽：偵測 Discord 原生 Embed 支援不佳的連結（Bilibili、
      Instagram、Threads、Pinterest、Twitter/X、TikTok），自動
-     擷取資訊並組成 Embed 回覆
+     擷取資訊並組成 Embed 回覆；偵測到影片時額外送出修復連結，
+     讓 Discord 原生嵌入播放
   2. 關鍵字摘要：訊息出現「摘要」等關鍵字並緊接任意網址時，爬取
      該網址的網頁純文字，透過 Gemma 生成摘要後回覆
 
@@ -64,7 +76,6 @@ from core.link_preview.flags import get_flag
 from core.link_preview.registry import get_extractor
 from core.link_preview.summarizer import summarize
 from core.link_preview.summary_trigger import find_summary_request
-from core.link_preview.video import download_if_within_limit
 from core.system.settings import get_int, get_str
 from utils.discord_errors import friendly_http_error
 
@@ -163,15 +174,22 @@ class LinkPreviewCog(commands.Cog):
 
         await self._maybe_summarize(preview)
 
-        # 影片附件成功時，Embed 就不再放縮圖（見 _build_embed 的
-        # has_video 參數說明），避免同一則訊息內「Embed 縮圖」與
-        # 「下方影片播放器」呈現幾乎相同的畫面，造成視覺上的重複。
-        file  = await self._maybe_build_video_file(preview)
-        embed = self._build_embed(preview, has_video=file is not None)
+        # 有 embed_video_link 且設定允許時，才會額外送出修復連結
+        # 讓 Discord 原生嵌入播放（見 _build_embed 的 has_video
+        # 參數說明：此時 Embed 本身不再放縮圖，避免與 Discord 原生
+        # 嵌入的影片預覽畫面重複）。
+        has_video = bool(preview.embed_video_link) and get_flag("link_preview.attach_video", True)
+        embed = self._build_embed(preview, has_video=has_video)
 
         try:
-            if file is not None:
-                await message.reply(embed=embed, file=file, mention_author=False)
+            if has_video:
+                # 純文字內容不能用 <> 角括號包住修復連結，否則 Discord
+                # 會抑制該連結的嵌入，導致完全沒有影片畫面。
+                await message.reply(
+                    content=preview.embed_video_link,
+                    embed=embed,
+                    mention_author=False,
+                )
             else:
                 await message.reply(embed=embed, mention_author=False)
         except discord.HTTPException as exc:
@@ -232,14 +250,12 @@ class LinkPreviewCog(commands.Cog):
         """
         組裝 Embed：作者列（平台）、來源、統計、標題、說明、縮圖、原始連結。
 
-        has_video 為 True 時（訊息會同時附上真正可播放的影片檔案），
-        Embed 刻意不再呼叫 set_image() 塞入縮圖：Discord 的 Bot 訊息
-        沒有辦法把上傳的影片附件「嵌進」rich embed 內部，只能讓附件與
-        Embed 一起顯示為同一則訊息中的兩個區塊。修正前不論是否已有
-        影片附件，Embed 一律固定放縮圖，導致同一則訊息同時出現「Embed
-        裡的靜態縮圖」與「下方可播放的完整影片」，兩者呈現的畫面幾乎
-        一樣，形同重複。改為影片存在時把縮圖讓給影片本身、Embed 只
-        負責文字資訊，沒有影片時才維持原本「縮圖 + 連結」的呈現方式。
+        has_video 為 True 時（訊息會額外送出修復連結，讓 Discord
+        原生嵌入播放影片），Embed 刻意不再呼叫 set_image() 塞入縮圖：
+        Discord 原生嵌入本身就會顯示影片的預覽畫面與播放按鈕，我們
+        的 Embed 若同時也放一張幾乎相同的縮圖，會讓同一則訊息出現
+        兩張看起來很像的圖，縮圖讓給 Discord 原生嵌入、我們的 Embed
+        只負責文字資訊，沒有影片時才維持原本「縮圖 + 連結」的呈現。
         """
         max_desc_chars = get_int("link_preview.embed_description_max_chars", 800)
 
@@ -286,28 +302,6 @@ class LinkPreviewCog(commands.Cog):
         if text is None or len(text) <= limit:
             return text
         return text[: max(0, limit - 1)].rstrip() + "..."
-
-    # ── 影片附件 ──────────────────────
-
-    async def _maybe_build_video_file(self, preview: LinkPreview) -> discord.File | None:
-        """
-        影片網址存在時嘗試下載並包裝為附件；超過大小上限或下載失敗
-        則回傳 None，退回「只顯示縮圖 + 連結」的呈現方式。
-
-        附件副檔名依 download_if_within_limit() 實際偵測到的格式
-        決定，不再統一寫死 .mp4。
-        """
-        if not preview.video_url:
-            return None
-        if not get_flag("link_preview.attach_video", True):
-            return None
-
-        result = await download_if_within_limit(preview.video_url, referer=preview.url)
-        if result is None:
-            return None
-
-        buffer, extension = result
-        return discord.File(buffer, filename=f"{preview.platform}.{extension}")
 
     # ── 抑制原生 Embed ──────────────────────
 

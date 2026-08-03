@@ -90,9 +90,8 @@ python bot.py
 | `link_preview.summary_trigger_min_chars` | 被動預覽的簡介文字達到幾字才觸發 Gemma 自動摘要 | `60` |
 | `link_preview.summary_max_chars` | 摘要輸出字數上限 | `200` |
 | `link_preview.summary_input_max_chars` | 送入 Gemma 摘要前，原文截斷長度上限 | `4000` |
-| `link_preview.attach_video` | 是否嘗試下載影片並以附件方式重新上傳 | `true` |
-| `link_preview.video_max_upload_mb` | 影片附件下載／上傳大小上限（MB） | `8` |
-| `link_preview.bilibili_fetch_video` | 是否額外呼叫 Bilibili 播放網址 API 取得影片並內嵌播放 | `true` |
+| `link_preview.attach_video` | 偵測到影片時，是否額外送出修復連結純文字，讓 Discord 原生嵌入播放（不下載影片檔案，見〈連結預覽〉一節說明） | `true` |
+| `link_preview.bilibili_fetch_video` | 是否為 Bilibili 額外產生 vxbilibili.com 風格的修復連結供內嵌播放 | `true` |
 | `link_preview.instagram_proxy_hosts` | Instagram 代理服務候選網域清單，依序嘗試（全部失敗後會再退回原始 instagram.com 網址本身） | `["ddinstagram.com", "instagramez.com", "kkinstagram.com", "d.ddinstagram.com"]` |
 | `link_preview.threads_proxy_hosts` | Threads 代理服務候選網域清單，依序嘗試（全部失敗後會再退回原始網址本身） | `["vxthreads.net", "viewthreads.com"]` |
 | `link_preview.twitter_proxy_hosts` | Twitter/X 代理服務候選網域清單，依序嘗試（全部失敗後會再退回原始網址本身） | `["fxtwitter.com", "vxtwitter.com"]` |
@@ -174,15 +173,14 @@ discord-bot-main/
 │   │   ├── og_meta.py                 # 通用 Open Graph meta 標籤解析（含 og:video）
 │   │   ├── article.py                 # 通用網頁純文字擷取（關鍵字摘要用）
 │   │   ├── summary_trigger.py         # 「關鍵字 + 網址」摘要請求偵測
-│   │   ├── bilibili.py                # Bilibili 擷取器（含防 412 標頭）
+│   │   ├── bilibili.py                # Bilibili 擷取器（含防 412 標頭，產生 vxbilibili.com 修復連結）
 │   │   ├── instagram.py               # Instagram 擷取器（多候選代理網域 + 原始網域備援）
 │   │   ├── threads.py                 # Threads 擷取器（多候選代理網域 + 原始網域備援）
 │   │   ├── pinterest.py               # Pinterest 擷取器
 │   │   ├── twitter.py                 # Twitter/X 擷取器（多候選代理網域 + 原始網域備援）
 │   │   ├── tiktok.py                  # TikTok 擷取器（多候選代理網域 + 原始網域備援）
 │   │   ├── registry.py                # 平台字串 → 擷取器 對應表
-│   │   ├── summarizer.py              # 使用 Gemma 生成內容摘要
-│   │   └── video.py                   # 影片下載、格式驗證與 Bilibili 播放網址解析
+│   │   └── summarizer.py              # 使用 Gemma 生成內容摘要
 │   ├── logging/                   # 統一日誌設定
 │   ├── minecraft/                 # 珍珠炮計算引擎
 │   ├── music/                     # 音樂播放器引擎
@@ -226,7 +224,7 @@ Discord 對 Bilibili 短連結（`b23.tv`）、Instagram、Threads、Pinterest�
    - **Instagram／Threads／Twitter(X)／TikTok**：透過社群維運的公開代理服務，解析頁面的 `og:*` meta 標籤取得標題、說明文字、縮圖、影片網址。這類代理服務由個人或社群維運，生命週期不穩定是常態（網域可能停止解析、暫時回應 502 等），因此每個平台皆設有多個候選網域（見〈設定檔說明〉的 `*_proxy_hosts`），依序嘗試直到成功，單一服務失效不會讓整個平台的預覽功能完全停擺。
    - **Pinterest**：Discord 對 Pinterest 原生支援尚可但不完整，直接請求頁面解析 `og:*` 標籤，`pin.it` 短連結由 httpx 的 `follow_redirects` 自動處理。
 3. **簡介摘要**：若簡介文字長度超過 `link_preview.summary_trigger_min_chars`，改用 Gemma（`core/ai/models.py` 的 `MODELS["gemma"]`）生成繁體中文摘要取代原文，控制 token 用量。
-4. **影片**：若擷取到可下載的影片網址，且大小在 `link_preview.video_max_upload_mb` 範圍內，會下載並以附件形式重新上傳，讓影片能在 Discord 內直接播放；下載前會驗證回應的 Content-Type 確實是影片格式（避免代理服務異常時回傳的錯誤頁被誤當成影片上傳），附件副檔名依實際偵測到的格式決定（mp4／webm／mov／mkv），非以上格式或超過大小上限則優雅退回「僅顯示縮圖 + 原始連結」。
+4. **影片**：偵測到影片時，會額外把修復網域網址（例如 vxbilibili.com、fxtwitter.com）當作訊息的純文字內容一併送出，讓 Discord 自己的爬蟲原生解析並嵌入可播放的影片；我們自己組的 Embed 負責標題／統計／說明等文字資訊，兩者呈現內容不同、不會重複。這個做法沒有 Discord 附件的檔案大小上限問題，也不需要下載影片消耗頻寬（參考真實案例 FixTweetBot 的做法）。
 5. **組裝與回覆**：組成 Embed（作者列／來源列／統計數據列／標題／縮圖或影片／原始連結）並以回覆方式送出。內文最後固定附上一行「[查看原始貼文](網址)」的可點擊連結，讓使用者不需要額外點擊標題也能清楚看到並前往原始出處；內文超過 `link_preview.embed_description_max_chars` 會自動截斷，避免超過 Discord Embed 長度上限。若 Bot 具備「管理訊息」權限，會嘗試抑制原訊息的低品質原生 Embed。
 
 **為何不處理 YouTube**：Discord 對 `youtube.com` / `youtu.be` 連結原生就有官方 oEmbed 支援，會自動顯示標題、頻道、縮圖，並提供可直接播放的內嵌播放器，功能已經完整。若我們再額外發一則自製 Embed，同一則連結會出現兩份重複的預覽，是更差的體驗，因此刻意不處理。
@@ -544,7 +542,7 @@ Instagram／Threads／Twitter(X)／TikTok 的預覽依賴社群維運的第三�
 1. `settings.json` 的 `link_preview.enabled` 是否為 `true`
 2. Bot 的 Intents 是否已開啟 `message_content`（讀不到訊息文字就偵測不到連結或關鍵字）
 3. **Instagram／Threads／Pinterest 屬於平台本身限制**：三者未登入狀態下頁面能取得的 `og:*` 標籤本來就有限，有時只能取得標題與極少描述，屬於預期行為而非程式錯誤；如需更完整資料，需要額外串接登入態 Cookie（尚未內建，可依 `core/link_preview/instagram.py`／`threads.py`／`pinterest.py` 內的註解自行擴充）。
-4. 影片沒有被上傳為附件：多半是超過 `link_preview.video_max_upload_mb` 大小上限而自動退回「僅縮圖 + 連結」，屬正常降級行為。
+4. 影片沒有嵌入播放：確認 `link_preview.attach_video` 是否為 `true`；若該平台目前所有代理網域都失敗，會直接退回「僅文字資訊 + 連結」，可參考本文件〈連結預覽某平台完全沒有反應〉一節排除。
 5. Bilibili API 回傳 `412`：已固定在請求加上 `Referer` / `Origin` 標頭修正，若仍發生，可能是 Bilibili 端另外調整了防爬機制，需重新確認所需標頭。
 
 ### 「摘要」關鍵字沒有反應 / 一直回覆無法擷取
@@ -593,7 +591,33 @@ Google 官方後繼模型是 `gemini-embedding-001`，呼叫介面相容（只�
 
 ## Changelog
 
-### 本輪：全專案健檢、markitdown 整合、新增 /ai 與 /markdown 指令
+### 本輪：參考 FixTweetBot 修正影片截取邏輯
+
+實測比對真實案例 [FixTweetBot](https://github.com/dziurwa/FixTweetBot)（一款成熟的公開 Discord 連結修復 Bot，支援數十種平台含 Bilibili）的原始碼後，發現我們原本「下載影片位元組、重新包裝成 Discord 附件上傳」的做法，比它的作法複雜且更脆弱：受限於檔案大小上限、消耗自己的頻寬、且下載＋上傳比純粹送出一個連結慢得多。FixTweetBot 從頭到尾都不下載影片，只是把連結網域替換成修復網域（例如 bilibili.com → vxbilibili.com），送出這個修復後的網址純文字，讓 **Discord 自己的爬蟲**原生解析並嵌入可播放的影片——這正是這類「修復網域」服務存在的目的。
+
+**core/link_preview/base.py**
+- `LinkPreview` 新增 `embed_video_link` 欄位：修復網域頁面網址，設計上要當作純文字內容送出（不加 `<>` 角括號），讓 Discord 原生嵌入播放。與 `video_url`（供下載用的直接影片檔案網址，目前渲染路徑未使用）用途不同
+
+**core/link_preview/bilibili.py**
+- 不再呼叫 Bilibili playurl API 下載影片，改為產生 `vxbilibili.com` 風格的修復連結（`bilibili.com`／`b23.tv`／`b22.top` 皆比照辦理，`www.`／`m.` 字首視為裝飾性前綴一併去除）
+
+**core/link_preview/instagram.py／threads.py／twitter.py／tiktok.py**
+- 偵測到 `og:video` 時，改用「本次成功回應的代理網址本身」作為 `embed_video_link`，不再交由 Cog 層下載
+- Instagram 新增 `oginstagram.com`：查證 FixTweetBot 目前實際採用（且是唯一選擇）的 Instagram 修復網域正是這個，可信度較高
+
+**cogs/events/link_preview.py**
+- 移除 `_maybe_build_video_file()`（下載影片邏輯）；`_handle_link()` 改為偵測到 `embed_video_link` 時，將其作為訊息純文字內容與 Embed 一併送出
+- `_build_embed()` 的 `has_video` 判斷依據改為「`embed_video_link` 是否存在」，而非「是否已成功下載影片」，行為不變：有影片時縮圖讓給 Discord 原生嵌入本身，避免兩者呈現幾乎相同的畫面
+
+**core/link_preview/video.py（已移除）**
+- 檔案內容（下載影片位元組、Bilibili playurl API 呼叫）已無任何呼叫端使用，整個檔案移除
+
+**settings.json／core/system/settings.py**
+- 移除已無作用的 `link_preview.video_max_upload_mb`（不再下載影片，沒有上傳大小上限需要限制）
+
+---
+
+### 上一輪：全專案健檢、markitdown 整合、新增 /ai 與 /markdown 指令
 
 **core/ai/file_parser/document_parser.py**
 - 改用 [markitdown](https://pypi.org/project/markitdown/) 統一處理 pdf／docx／xlsx／xls／pptx，取代原本各自獨立的 pypdf／python-docx／openpyxl／python-pptx 邏輯

@@ -21,6 +21,7 @@ database/logs/
 # ── 執行期資料庫與設定（database/ai/sqlite.py: memory.db）──────────────────────
 database/ai/*.db
 database/prompts/active.txt
+output.txt
 
 # ── 作業系統 ──────────────────────
 .DS_Store

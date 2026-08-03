@@ -20,7 +20,12 @@ Modification():
   替換成同樣的 host 等於維持原網址不變，讓 try_hosts() 額外多打一次
   原始網址；所有代理都掛掉時，原本會直接放棄，現在多一次「至少
   試試看官方頁面本身」的機會，不會更差。
-- 新增讀取 og:video 標籤，供 Cog 層決定是否下載內嵌播放。
+- 新增讀取 og:video 標籤：偵測到影片時，將本次成功回應的代理網址
+  本身（response.url）設為 embed_video_link，交由 Cog 層當作純文字
+  內容送出，讓 Discord 自己的爬蟲原生嵌入播放，不再下載影片位元組
+  重新上傳。參考真實案例 FixTweetBot（成熟的公開 Discord 連結
+  修復 Bot）的做法：它從頭到尾都不下載影片，只送出修復後的連結
+  文字，這樣沒有 Discord 附件的檔案大小上限問題。
 
 職責：
 
@@ -74,14 +79,17 @@ async def extract(url: str) -> LinkPreview | None:
         logger.warning("[Threads] 未取得任何 og 標籤 url=%s", url)
         return None
 
+    video = tags.get("video")
+
     return LinkPreview(
-        platform       = "threads",
-        platform_label = "Threads",
-        source_label   = f"via {response.url.host}",
-        url            = url,
-        title          = tags.get("title"),
-        description    = tags.get("description"),
-        thumbnail_url  = tags.get("image"),
-        video_url      = tags.get("video"),
-        color          = 0x101010,
+        platform         = "threads",
+        platform_label   = "Threads",
+        source_label     = f"via {response.url.host}",
+        url              = url,
+        title            = tags.get("title"),
+        description      = tags.get("description"),
+        thumbnail_url    = tags.get("image"),
+        video_url        = video,
+        embed_video_link = str(response.url) if video else None,
+        color            = 0x101010,
     )

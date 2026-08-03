@@ -3,6 +3,18 @@ core/link_preview/instagram.py
 
 Modification():
 
+- 修正「影片截取」作法：不再透過 Cog 層下載 og:video 網址重新上傳，
+  改為當偵測到影片時，把「本次成功回應的代理網址本身」
+  （response.url，例如 https://ddinstagram.com/p/xxx）設為
+  embed_video_link，交由 Cog 層當作純文字內容送出，讓 Discord 自己
+  的爬蟲原生嵌入播放。這些代理服務本來就是設計給 Discord／Telegram
+  的爬蟲讀取用的，讓它們原生處理沒有 Discord 附件的檔案大小上限
+  問題，也不需要消耗頻寬下載＋上傳。參考真實案例 FixTweetBot（一款
+  成熟的公開 Discord 連結修復 Bot）的做法：它從頭到尾都不下載
+  影片，只送出修復後的連結文字。
+- _DEFAULT_HOSTS 新增 oginstagram.com：查證真實案例 FixTweetBot
+  目前實際採用的 Instagram 修復網域正是 oginstagram.com（且是它
+  唯一使用的選擇，沒有其他備援），可信度較高，因此排在第二順位。
 - _DEFAULT_HOSTS 新增 instagramez.com：與既有的 ddinstagram /
   kkinstagram 系列由不同開發者獨立維運，單純增加一個不會同時故障
   的候選來源。
@@ -20,8 +32,6 @@ Modification():
   候選清單由 settings.json 的 link_preview.instagram_proxy_hosts
   控制，之後若某個代理服務又停止運作，只需調整設定即可，
   不需要修改程式碼。
-- 新增讀取 og:video 標籤：部分代理服務會在頁面中提供可直接下載
-  的影片網址，取得後交由 Cog 層決定是否下載並以附件形式內嵌播放。
 
 職責：
 
@@ -48,7 +58,7 @@ logger = logging.getLogger("bot.link_preview.instagram")
 _INSTA_HOST_RE = re.compile(r"(www\.)?instagram\.com", re.IGNORECASE)
 
 # 候選代理網域的內建後備清單；settings.json 未設定時使用此值
-_DEFAULT_HOSTS = ["ddinstagram.com", "instagramez.com", "kkinstagram.com", "d.ddinstagram.com"]
+_DEFAULT_HOSTS = ["ddinstagram.com", "oginstagram.com", "instagramez.com", "kkinstagram.com", "d.ddinstagram.com"]
 
 
 # ── 對外介面 ──────────────────────
@@ -75,14 +85,17 @@ async def extract(url: str) -> LinkPreview | None:
         logger.warning("[Instagram] 未取得任何 og 標籤 url=%s", url)
         return None
 
+    video = tags.get("video")
+
     return LinkPreview(
-        platform       = "instagram",
-        platform_label = "Instagram",
-        source_label   = f"via {response.url.host}",
-        url            = url,
-        title          = tags.get("title"),
-        description    = tags.get("description"),
-        thumbnail_url  = tags.get("image"),
-        video_url      = tags.get("video"),
-        color          = 0xE1306C,
+        platform         = "instagram",
+        platform_label   = "Instagram",
+        source_label     = f"via {response.url.host}",
+        url              = url,
+        title            = tags.get("title"),
+        description      = tags.get("description"),
+        thumbnail_url    = tags.get("image"),
+        video_url        = video,
+        embed_video_link = str(response.url) if video else None,
+        color            = 0xE1306C,
     )
