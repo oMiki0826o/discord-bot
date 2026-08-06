@@ -3,6 +3,17 @@ core/link_preview/bilibili.py
 
 Modification():
 
+- 修正 embed_video_link 網址雜訊問題（實測截圖回報：Discord 完全沒
+  有產生原生嵌入，訊息裡只剩一行含大量追蹤參數的醜陋純文字連結，
+  沒有任何播放器或來源資訊）：原本 _build_fixed_video_link() 是對
+  「整個原始網址」做網域替換，但透過 Bilibili App 分享按鈕複製的
+  連結，會附帶大量追蹤參數（buvid、from_spmid、mid、
+  share_session_id、unique_k、up_id 等），原封不動轉貼到
+  vxbilibili.com 後，該服務未必能正確處理。改為只用已解析出的
+  bvid 組出最簡潔的網址（https://vxbilibili.com/video/{bvid}/），
+  不帶任何多餘查詢參數。連帶移除只有這個舊做法在用的
+  _BILI_DOMAIN_RE（改用 bvid 後不再需要對原始網址做正規表示式
+  網域替換）。
 - 修正「影片截取」的核心作法：原本呼叫 Bilibili playurl API 取得
   可下載的影片串流網址，下載到記憶體後再以 Discord 附件重新上傳。
   這個做法有兩個實際問題：(1) 受限於 link_preview.video_max_upload_mb
@@ -68,13 +79,6 @@ _BILI_HEADERS = {
     "Origin":  "https://www.bilibili.com",
 }
 
-# 涵蓋一般連結（bilibili.com）與官方短連結（b23.tv、b22.top）；
-# www. 與 m.（行動版）字首視為裝飾性前綴一併去除，避免產生
-# 不存在的 m.vxbilibili.com，與 FixTweetBot 的 BiliBiliLink 規則一致。
-_BILI_DOMAIN_RE = re.compile(
-    r"(?:www\.|m\.)?(bilibili\.com|b23\.tv|b22\.top)", re.IGNORECASE
-)
-
 
 # ── 對外介面 ──────────────────────
 
@@ -111,7 +115,7 @@ async def extract(url: str) -> LinkPreview | None:
 
     embed_video_link = None
     if get_flag("link_preview.bilibili_fetch_video", True):
-        embed_video_link = _build_fixed_video_link(real_url)
+        embed_video_link = _build_fixed_video_link(bvid)
 
     # ── 統計欄位 ──────────────────────
     stats = [
@@ -155,17 +159,23 @@ async def _resolve_redirect(client, url: str) -> str:
         return url
 
 
-def _build_fixed_video_link(url: str) -> str | None:
+def _build_fixed_video_link(bvid: str) -> str:
     """
-    將網址的網域替換為 vx 字首版本（bilibili.com → vxbilibili.com），
-    取得可讓 Discord 原生嵌入播放的修復連結。與 FixTweetBot 的
-    BiliBiliLink.get_fixed_url() 規則一致：不論原始網域是
-    bilibili.com、b23.tv 或 b22.top，一律在前面加上 "vx"。
+    組出 vxbilibili.com 風格的乾淨修復連結，只用 bvid，不沿用原始
+    網址的其餘部分。
+
+    修正：原本直接對整個 real_url 做網域替換（_BILI_DOMAIN_RE.sub），
+    但透過 Bilibili App「分享」按鈕複製的連結，會附帶大量追蹤參數
+    （buvid、from_spmid、mid、share_session_id、unique_k、up_id 等，
+    實測過一條連結可以長達數百字元）。這些參數原封不動轉貼到
+    vxbilibili.com 後，該服務未必能正確處理，實測結果是 Discord
+    完全沒有產生原生嵌入，訊息裡只剩一行含大量雜訊參數、純文字、
+    無法點出預覽的醜陋連結——與「讓 Discord 原生嵌入播放影片」這個
+    目的完全相反。改為只用已經解析出的 bvid 組出最簡潔的網址
+    （https://vxbilibili.com/video/{bvid}/），不帶任何多餘查詢參數，
+    這正是 vxbilibili.com 這類服務設計上預期收到的網址格式。
     """
-    match = _BILI_DOMAIN_RE.search(url)
-    if not match:
-        return None
-    return _BILI_DOMAIN_RE.sub("vx" + match.group(1), url, count=1)
+    return f"https://vxbilibili.com/video/{bvid}/"
 
 
 def _format_count(value: int | None) -> str:

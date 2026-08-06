@@ -15,6 +15,13 @@ cogs/events/status.py
 
 Modification():
 
+- 修正 _apply() 未接住 change_presence() 例外的問題：實測 log 出現
+  連線剛重連、還不穩定時呼叫 change_presence() 拋出
+  ClientConnectionResetError，沒有 try/except 會直接冒出到
+  discord.py 的通用 on_ready 例外處理器，印出一長串看起來很嚴重
+  但其實不影響其他功能的 traceback。狀態套用本來就是「盡力而為、
+  失敗也無妨」的操作，改為捕捉例外並以 WARNING 記錄，不讓它繼續
+  往外傳。
 - 移植自 Bot-Firefly/cogs/events/status.py
 - 移除獨立 status.json，改寫 settings.json（統一設定）
 - 新增 custom 活動類型支援
@@ -58,7 +65,20 @@ def _build_activity(atype: str, text: str) -> discord.BaseActivity:
 
 
 async def _apply(bot: commands.Bot) -> None:
-    """從 settings.json 讀取設定並套用 Discord 狀態。"""
+    """
+    從 settings.json 讀取設定並套用 Discord 狀態。
+
+    change_presence() 需要透過目前的 WebSocket 連線送出封包；若
+    on_ready 恰好在連線剛重連、尚未完全穩定的瞬間觸發（例如網路
+    短暫中斷後的重連過程），呼叫這個函式有機率撞上連線正在關閉
+    或還沒就緒的競態，拋出連線層級的例外（實測 log 出現過
+    ClientConnectionResetError: Cannot write to closing transport）。
+    這種失敗是暫時性的、非致命的——狀態套用失敗頂多讓 Bot 的顯示
+    狀態暫時沒更新，不影響其他任何功能，下一次 on_ready 或
+    $status 指令一樣能重新套用，因此不需要讓例外往外傳、更不需要
+    讓它冒出到 discord.py 的通用 on_ready 例外處理器變成一長串
+    看起來很嚴重、但其實不影響運作的 traceback。
+    """
     presence = get("bot.presence",     "online")
     atype    = get("bot.status_type",  "listening")
     text     = get("bot.status_text",  "/play | @我")
@@ -66,7 +86,14 @@ async def _apply(bot: commands.Bot) -> None:
     status   = _STATUS_MAP.get(presence, discord.Status.online)
     activity = _build_activity(atype, text)
 
-    await bot.change_presence(status=status, activity=activity)
+    try:
+        await bot.change_presence(status=status, activity=activity)
+    except Exception as e:
+        logger.warning(
+            "[status] 套用狀態失敗（可能是連線剛重連尚未穩定，非致命）: %s", e
+        )
+        return
+
     logger.info("[status] 套用成功 presence=%s type=%s text=%r", presence, atype, text)
 
 

@@ -146,6 +146,7 @@
     "summary_input_max_chars": 4000,
     "summary_keyword": "摘要",
     "summary_fetch_max_chars": 6000,
+    "article_fetch_max_bytes": 3000000,
     "summary_fail_message": "無法擷取這個網址的內容，可能是網站封鎖爬取或內容非純文字頁面。",
     "instagram_proxy_hosts": [
       "ddinstagram.com",

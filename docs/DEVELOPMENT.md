@@ -98,6 +98,7 @@ python bot.py
 | `link_preview.tiktok_proxy_hosts` | TikTok 代理服務候選網域清單，依序嘗試（全部失敗後會再退回原始網址本身） | `["tnktok.com", "vxtiktok.com"]` |
 | `link_preview.summary_keyword` | 觸發通用網頁摘要的關鍵字 | `摘要` |
 | `link_preview.summary_fetch_max_chars` | 關鍵字摘要功能抓取網頁純文字的長度上限 | `6000` |
+| `link_preview.article_fetch_max_bytes` | 關鍵字摘要功能抓取網頁時，回應內容的位元組數上限（超過只使用已讀取的部分，避免惡意網站回傳超大內容） | `3000000`（約 3MB） |
 | `link_preview.summary_fail_message` | 網頁爬取失敗時的回覆訊息 | `無法擷取這個網址的內容，可能是網站封鎖爬取或內容非純文字頁面。` |
 
 執行 `$settings reload` 即可熱更新，無需重啟 Bot。
@@ -171,7 +172,8 @@ discord-bot-main/
 │   │   ├── flags.py                   # 布林設定讀取輔助
 │   │   ├── http.py                    # 共用 httpx.AsyncClient 設定
 │   │   ├── og_meta.py                 # 通用 Open Graph meta 標籤解析（含 og:video）
-│   │   ├── article.py                 # 通用網頁純文字擷取（關鍵字摘要用）
+│   │   ├── article.py                 # 通用網頁純文字擷取（關鍵字摘要用，含 SSRF 防護）
+│   │   ├── url_guard.py               # SSRF 防護：驗證任意使用者網址是否可安全連線
 │   │   ├── summary_trigger.py         # 「關鍵字 + 網址」摘要請求偵測
 │   │   ├── bilibili.py                # Bilibili 擷取器（含防 412 標頭，產生 vxbilibili.com 修復連結）
 │   │   ├── instagram.py               # Instagram 擷取器（多候選代理網域 + 原始網域備援）
@@ -591,7 +593,36 @@ Google 官方後繼模型是 `gemini-embedding-001`，呼叫介面相容（只�
 
 ## Changelog
 
-### 本輪：參考 FixTweetBot 修正影片截取邏輯
+### 本輪：log 問題修正 + 第三方稽核報告優先項目
+
+使用者提供一份實際運作 20 小時、16.7MB 的真實 log 檔案，以及兩份第三方稽核報告（深度稽核、未來優化路線圖）。稽核報告條列的項目規模很大（含完整的 AutoMod／AntiRaid 系統、70+ 處同步 SQLite 呼叫的全面非同步化等，屬於數週等級的工程量），本輪聚焦處理 log 檔案暴露的具體問題，以及稽核報告中風險最高、範圍明確、可以在合理範圍內完成的項目；規模較大的架構性項目留在稽核報告與路線圖文件中，作為後續分階段處理的依據，不在本輪倉促處理，以免範圍過大反而引入新的錯誤。
+
+**log 問題（源自實測 log 檔案）**
+
+- **core/logging/log.py**：修正第三方套件 DEBUG 雜訊灌爆 log 檔案的問題。實測發現使用者上傳一份 PDF 讓 markitdown 解析時，底層 pdfminer.six 記錄極其詳細的逐一 token DEBUG 訊息，單一份 PDF 就產生超過 20 萬行、佔整份 log 檔案 99.63% 的體積。根本原因是 root logger 設為 DEBUG，第三方套件沒有各自設定層級因而全部繼承。原本只窄範圍列出 discord.py 幾個 logger 來壓制，改為更通用的做法：root logger 預設為 WARNING（涵蓋所有第三方套件，含未來新增的），我們自己的 logger 才依命名空間明確設回 DEBUG。實測驗證：pdfminer、httpcore、以至於一個假設的未來函式庫，皆自動被壓制在 WARNING，不需要之後再回來加清單。
+- **core/logging/constants.py**：修正 `LOG_MAX_BYTES` 從 50MB 改為 7MB。關機報告會把整份 log 私訊給 Owner，先前的門檻通過（16.7MB < 50MB）但 Discord 實際拒絕上傳（413 Payload Too Large），代表這道自訂門檻完全沒有真正發揮作用。查證 Discord 對 Bot 上傳的實際限制約 8MB，改為 7MB 留安全餘裕。
+- **core/logging/log.py／constants.py**：新增以大小為準的 log 檔案輪替（`RotatingFileHandler`，20MB／保留 5 份），避免 Bot 長時間不重啟持續運作時，單一 log 檔案無上限成長。
+- **cogs/events/status.py**：修正 `_apply()` 未接住 `change_presence()` 例外的問題。實測 log 出現連線剛重連、還不穩定時呼叫 `change_presence()` 拋出 `ClientConnectionResetError`，沒有 try/except 會直接冒出到 discord.py 的通用 `on_ready` 例外處理器，印出一長串看起來很嚴重但其實不影響其他功能的 traceback。改為捕捉例外並以 WARNING 記錄。
+
+**Bilibili 影片嵌入失效（使用者提供截圖回報）**
+
+- **core/link_preview/bilibili.py**：修正 `embed_video_link` 網址雜訊問題。透過 Bilibili App 分享按鈕複製的連結會附帶大量追蹤參數（`buvid`、`from_spmid`、`mid`、`share_session_id`、`unique_k`、`up_id` 等，可長達數百字元），原本直接對整個原始網址做網域替換，vxbilibili.com 收到這種塞滿雜訊參數的網址會處理失敗，導致 Discord 完全沒有產生原生嵌入，訊息裡只剩一行含大量追蹤參數的醜陋純文字連結。改為只用已解析出的 bvid 組出乾淨網址（`https://vxbilibili.com/video/{bvid}/`）。已用截圖中出現的實際網址模式驗證修正有效。
+
+**第三方稽核報告 P1 項目**
+
+- **database/ai/sqlite.py**：修正 `DB_PATH` 環境變數被完全忽略的問題。原本資料庫路徑寫死為固定值，不論 `.env` 裡的 `DB_PATH` 設定成什麼都不會生效。改為實際讀取 `config.DB_PATH`：相對路徑解析到專案根目錄下，絕對路徑則直接使用。
+- **core/ai/attachment_utils.py**：修正非圖片附件在檢查大小前就先完整下載的問題。`read_image_part()` 原本就正確地在下載前用 `attachment.size` 檢查大小，但 `parse_attachment_file()` 沒有比照辦理，會先把整個檔案存到暫存檔，之後才由 file_parser 用磁碟上的實際大小判斷是否超過上限——對明顯超過上限的大檔案而言，等於白白下載一次才拒絕。補上下載前的大小檢查，兩者行為現在一致。
+- **core/link_preview/url_guard.py（新增）／article.py**：修正 SSRF（Server-Side Request Forgery）風險。「摘要 <網址>」這個關鍵字觸發功能，原本直接對使用者提供的任意網址發送請求，沒有任何驗證，理論上可被用來讓 Bot 對內網服務或雲端 metadata 端點（169.254.169.254）發送請求。新增 `url_guard.is_safe_url()`：驗證 scheme 僅允許 http/https，並檢查解析出的每一個 IP 是否落在私有網段、迴路、連結本地等範圍。同時關閉 httpx 的自動追隨重定向，改為手動逐跳處理，每一跳都重新驗證——這是關鍵的一步，因為若只驗證最初的網址，伺服器只要用 3xx 導向到內網位址就能繞過檢查。另外加上回應大小上限（預設 3MB），避免惡意網站回傳超大內容造成記憶體用量失控。已寫成 9 項正式測試（`tests/test_url_guard.py`），涵蓋雲端 metadata 端點、內網網段、非 http(s) 協定、以及「重定向到內網位址會被擋下」這個最關鍵的情境。
+- **core/link_preview/http.py**：`build_client()` 新增 `follow_redirects` 參數（預設 `True`，其餘擷取器不受影響），供 `article.py` 需要手動驗證每一跳重定向時使用。
+
+**本輪暫不處理、留待後續分階段進行的項目**（詳見稽核報告與路線圖文件）：
+- 70+ 處同步 SQLite 呼叫尚未非同步化（規模較大，需要系統性設計而非逐一修補，貿然大範圍修改風險較高）
+- AutoMod／AntiRaid／AntiScam／新成員驗證系統（全新子系統，非既有程式碼修正範疇）
+- 錯誤訊息 ID 化、log 內容遮罩敏感資訊、CI 自動化等，屬於錦上添花但非緊急的項目
+
+---
+
+### 上一輪：參考 FixTweetBot 修正影片截取邏輯
 
 實測比對真實案例 [FixTweetBot](https://github.com/dziurwa/FixTweetBot)（一款成熟的公開 Discord 連結修復 Bot，支援數十種平台含 Bilibili）的原始碼後，發現我們原本「下載影片位元組、重新包裝成 Discord 附件上傳」的做法，比它的作法複雜且更脆弱：受限於檔案大小上限、消耗自己的頻寬、且下載＋上傳比純粹送出一個連結慢得多。FixTweetBot 從頭到尾都不下載影片，只是把連結網域替換成修復網域（例如 bilibili.com → vxbilibili.com），送出這個修復後的網址純文字，讓 **Discord 自己的爬蟲**原生解析並嵌入可播放的影片——這正是這類「修復網域」服務存在的目的。
 

@@ -6,16 +6,40 @@ Modification():
   沒有 bot/ 這層資料夾（entry point 是根目錄的 bot.py，不是資料夾），
   實際路徑是 core/logging/log.py。
 
-- 新增 _write_session_header()：每次啟動時寫入 session 分隔線（Python 版本、PID、時間）
+- 修正第三方套件 DEBUG 雜訊灌爆 log 檔案的問題：實測發現使用者上傳
+  一份 PDF 讓 markitdown 解析時，底層 pdfminer.six 會記錄極其詳細的
+  逐一 token DEBUG 訊息（例如「nexttoken: (1342485, 0)」這種等級），
+  單一份 PDF 就能產生超過 20 萬行、佔整份 log 檔案 99.63% 的體積，
+  把整份 16.7MB 的 log 灌到幾乎只剩雜訊，真正有意義的錯誤訊息被
+  淹沒在裡面。根本原因：root logger 被設為 DEBUG，而 pdfminer 等
+  第三方套件的 logger 沒有各自設定層級，於是全部繼承 root 的 DEBUG，
+  毫無保留地把內部除錯訊息全部寫進我們的 log 檔案。
+  原本的作法（_DISCORD_LOGGERS）只窄範圍地列出 discord.py 的幾個
+  logger 名稱來壓制，這次改用更通用的做法：root logger 預設改為
+  WARNING（涵蓋「所有」第三方套件，不限於 discord.py 或 pdfminer），
+  我們自己的 logger 才明確依命名空間逐一設回 DEBUG。這樣未來不管
+  再新增哪個第三方依賴（例如日後幫 markitdown 加裝
+  audio-transcription extra、或任何其他函式庫），一律自動被壓制在
+  WARNING，不需要每次發現新的雜訊來源就回來這裡加一行。
+  _DISCORD_LOGGERS／_DISCORD_LOG_LEVEL 因此成為多餘的特例（root
+  預設值已經涵蓋 discord.py），一併移除。
+
+- 新增 log 檔案輪替：原本用 logging.FileHandler，單一 log 檔案沒有
+  任何大小上限，若 Bot 長時間不重啟持續運作，理論上會無限成長
+  （即使已經修正上面提到的第三方套件雜訊問題，長時間運作累積下來
+  仍可能是個問題）。改用 logging.handlers.RotatingFileHandler，
+  超過 LOG_ROTATE_MAX_BYTES（20MB）就自動切到新檔案，最多保留
+  LOG_ROTATE_BACKUP_COUNT（5）份輪替後的舊檔，避免磁碟空間被無上限
+  佔用。
 - Singleton 保護、handler 重複掛載防護維持不變
 - attach_bot() 保持冪等（同一 bot 不重複掛載 DiscordErrorHandler）
-- 壓制 discord 內部 logger 至 WARNING，避免 WebSocket 封包噪音
 
 """
 
 from __future__ import annotations
 
 import logging
+import logging.handlers
 import os
 import platform
 import sys
@@ -26,22 +50,31 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from .constants import DATE_FORMAT, LOG_DIR, LOG_FILE, LOG_FORMAT
+from .constants import (
+    DATE_FORMAT,
+    LOG_DIR,
+    LOG_FILE,
+    LOG_FORMAT,
+    LOG_ROTATE_BACKUP_COUNT,
+    LOG_ROTATE_MAX_BYTES,
+)
 from .discord_error_handler import DiscordErrorHandler, send_shutdown_report
 
 if TYPE_CHECKING:
     from discord.ext import commands
 
-# ── discord 內部 logger 壓制層級 ──────────────────────
-_DISCORD_LOG_LEVEL = logging.WARNING
-
-# ── 受壓制的 discord 子 logger 清單 ──────────────────────
-_DISCORD_LOGGERS: tuple[str, ...] = (
-    "discord",
-    "discord.http",
-    "discord.gateway",
-    "discord.client",
-    "discord.voice_client",
+# ── 我們自己的 logger 根命名空間 ──────────────────────
+# 專案內所有自訂 logger 都落在下列其中一個命名空間之下（見專案內
+# logging.getLogger(...) / LogManager().get_logger(...) 的實際呼叫）。
+# root logger 預設為 WARNING 之後，只有明確列在這裡的命名空間會被
+# 設回 DEBUG；新增「我們自己的」全新根命名空間時才需要在這裡補一行，
+# 新增第三方依賴不需要修改此清單。
+_OUR_LOG_ROOTS: tuple[str, ...] = (
+    "bot",
+    "startup",
+    "startup_registry",
+    "extension_loader",
+    "cogs",
 )
 
 
@@ -97,22 +130,28 @@ class LogManager:
         stream_handler = logging.StreamHandler()
         stream_handler.setFormatter(formatter)
 
-        # ── 檔案持久化 handler ──────────────────────
-        file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+        # ── 檔案持久化 handler（依大小輪替，避免長時間運作下無上限成長） ──────────────────────
+        file_handler = logging.handlers.RotatingFileHandler(
+            LOG_FILE,
+            maxBytes    = LOG_ROTATE_MAX_BYTES,
+            backupCount = LOG_ROTATE_BACKUP_COUNT,
+            encoding    = "utf-8",
+        )
         file_handler.setFormatter(formatter)
 
         # ── error 追蹤 handler（標記本次是否有 ERROR） ──────────────────────
         tracker = _ErrorTracker(self)
         tracker.setLevel(logging.ERROR)
 
-        root.setLevel(logging.DEBUG)
+        # root 預設為 WARNING：涵蓋所有第三方套件（見檔頭 Modification
+        # 說明），我們自己的 logger 再依 _OUR_LOG_ROOTS 逐一設回 DEBUG。
+        root.setLevel(logging.WARNING)
         root.addHandler(stream_handler)
         root.addHandler(file_handler)
         root.addHandler(tracker)
 
-        # ── 壓制 discord 內部噪音 ──────────────────────
-        for name in _DISCORD_LOGGERS:
-            logging.getLogger(name).setLevel(_DISCORD_LOG_LEVEL)
+        for name in _OUR_LOG_ROOTS:
+            logging.getLogger(name).setLevel(logging.DEBUG)
 
         # ── 寫入本次 session 的啟動標頭 ──────────────────────
         self._write_session_header()

@@ -151,6 +151,7 @@ _DEFAULTS: dict[str, Any] = {
     "link_preview.summary_input_max_chars":     4000,
     "link_preview.summary_keyword":             "摘要",
     "link_preview.summary_fetch_max_chars":     6000,
+    "link_preview.article_fetch_max_bytes":      3_000_000,
     "link_preview.instagram_proxy_hosts":       ["ddinstagram.com", "instagramez.com", "kkinstagram.com", "d.ddinstagram.com"],
     "link_preview.threads_proxy_hosts":         ["vxthreads.net", "viewthreads.com"],
     "link_preview.twitter_proxy_hosts":         ["fxtwitter.com", "vxtwitter.com"],

@@ -3,6 +3,15 @@ core/ai/attachment_utils.py
 
 Modification():
 
+- 修正 parse_attachment_file() 下載前未檢查大小的問題：原本會先把
+  整個附件透過 attachment.save() 完整下載到暫存檔，file_parser 才
+  在檔案已經落地之後，用磁碟上的實際大小判斷是否超過
+  MAX_FILE_SIZE。對一個明顯超過上限的大檔案而言，等於白白下載
+  一次才拒絕，浪費頻寬與磁碟 I/O。read_image_part() 原本就正確地
+  在下載前用 attachment.size（Discord 附件中繼資料，取得時不需要
+  下載檔案本身）先做這個檢查，這裡補上同樣的前置檢查，兩者現在
+  行為一致。
+
 - 新增本檔案：從 cogs/ai/chat.py 抽出附件處理邏輯（process_attachments /
   read_image_part / parse_attachment_file）。原本這三個函式是
   Chat Cog 的實例方法，但內容完全不使用 self（不依賴 Cog 的任何
@@ -31,7 +40,7 @@ import discord
 from google.genai import types
 
 from core.ai.file_parser import parse as parse_file
-from core.ai.file_parser.constants import IMAGE_EXTENSIONS, MAX_IMAGE_SIZE
+from core.ai.file_parser.constants import IMAGE_EXTENSIONS, MAX_FILE_SIZE, MAX_IMAGE_SIZE
 from core.ai.file_parser.models import ParsedFile
 from core.system.settings import get_int
 
@@ -107,7 +116,31 @@ async def read_image_part(
 async def parse_attachment_file(
     attachment: discord.Attachment,
 ) -> ParsedFile | None:
-    """寫入暫存檔後交由 file_parser 解析，確保暫存檔最終會被刪除。"""
+    """
+    寫入暫存檔後交由 file_parser 解析，確保暫存檔最終會被刪除。
+
+    下載前先用 attachment.size（Discord 附件中繼資料，取得時不需要
+    下載檔案本身）比對 MAX_FILE_SIZE：修正原本的問題——原本沒有這
+    一步，會先把整個附件完整下載到暫存檔，file_parser 才在檔案已經
+    落地之後用磁碟上的實際大小判斷是否超過上限。對一個明顯超過上限
+    的大檔案而言，等於白白下載一次才拒絕，浪費頻寬與磁碟 I/O。
+    比照 read_image_part() 已經正確採用的做法（下載前用
+    attachment.size 檢查），在這裡補上同樣的前置檢查。
+    """
+    if attachment.size > MAX_FILE_SIZE:
+        logger.info(
+            "[parse_attachment_file] 檔案過大，略過下載 filename=%s size=%d limit=%d",
+            attachment.filename, attachment.size, MAX_FILE_SIZE,
+        )
+        return ParsedFile(
+            filename=attachment.filename,
+            extension=Path(attachment.filename).suffix.lower(),
+            category="unknown",
+            size_bytes=attachment.size,
+            error=f"檔案大小 {attachment.size // 1024}KB 超過上限 "
+                  f"{MAX_FILE_SIZE // 1024}KB",
+        )
+
     suffix  = Path(attachment.filename).suffix
     tmp_fd, tmp_path_str = tempfile.mkstemp(suffix=suffix)
     tmp_path = Path(tmp_path_str)
