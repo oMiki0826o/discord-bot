@@ -116,7 +116,7 @@ async def _exec_memory(user_id: str, channel_id: str, query: str) -> str:
     try:
         from core.ai.memory_manager import search
         from core.ai.user_context import get_global_memories
-        bundle = search(user_id, channel_id, query, get_global_memories())
+        bundle = search(user_id, channel_id, query, await get_global_memories())
         if bundle.memories:
             lines = [f"- [{kw}] '{c}'" for kw, c, _ in bundle.memories[:5]]
             return "=== 工具：相關記憶 ===\n" + "\n".join(lines)
@@ -129,7 +129,7 @@ async def _exec_summary(user_id: str, channel_id: str, query: str) -> str:
     """channel_id / query 目前用不到，僅為符合共用的 ExecutorFn 簽名而保留。"""
     try:
         from core.ai.memory_manager import get_summary_text
-        s = get_summary_text(user_id)
+        s = await get_summary_text(user_id)
         return f"=== 工具：對話摘要 ===\n{s}" if s else ""
     except Exception as e:
         logger.debug("[tool_registry] summary executor error: %s", e)
@@ -140,7 +140,7 @@ async def _exec_profile(user_id: str, channel_id: str, query: str) -> str:
     """channel_id / query 目前用不到，僅為符合共用的 ExecutorFn 簽名而保留。"""
     try:
         from core.ai.user_context import profile_to_prompt
-        return profile_to_prompt(user_id)
+        return await profile_to_prompt(user_id)
     except Exception as e:
         logger.debug("[tool_registry] profile executor error: %s", e)
     return ""

@@ -2,6 +2,21 @@
 core/ai/memory_manager.py
 
 Modification():
+- 因應 database/repository/memory_repository.py 全面套用
+  utils.async_db.to_thread，本檔幾乎每個對外函式都改為 async def
+  並加上 await（save_message / save_memory / search / get_recent /
+  get_summary_text，以及原本就是 async 但缺 await 的
+  search_semantic / _extract / _summarize_if_needed /
+  _vectorize_recent / force_summarize）。
+  search() 內五個彼此獨立的查詢（background / raw_mems / raw_msgs /
+  recent / summary）改用 asyncio.gather() 平行執行，而非依序 await，
+  總等待時間取決於最慢的一個查詢，而非全部查詢時間總和。
+  呼叫端 core/ai/context_manager.py 原本用
+  loop.run_in_executor(None, memory_search, ...) 把整個同步的
+  search() 丟到執行緒池執行；search() 本身變成 async def 後不再
+  需要這層包裝，直接 await，呼叫端一併簡化。
+  cogs/ai/ai_owner_commands.py、cogs/events/message.py 等呼叫
+  save_message / force_summarize 等函式的地方已同步更新為 await。
 - 記憶快取、摘要門檻、候選數量與逾時秒數改為使用時讀取 settings.json。
 - 移除 import 時固定的設定常數，讓熱更新設定能真正影響記憶流程。
 - 背景任務仍由 event_bus 觸發，保持 core.py 與記憶副作用解耦。
@@ -152,15 +167,15 @@ def _vectorize_delay_seconds() -> float:
 
 # ── 儲存入口 ──────────────────────
 
-def save_message(user_id: str, role: str, content: str, channel_id: str = "") -> None:
-    repo.insert_message(user_id, role, content, channel_id)
+async def save_message(user_id: str, role: str, content: str, channel_id: str = "") -> None:
+    await repo.insert_message(user_id, role, content, channel_id)
 
 
-def save_memory(user_id: str, keyword: str, content: str, importance: int = 1) -> None:
+async def save_memory(user_id: str, keyword: str, content: str, importance: int = 1) -> None:
     importance = max(1, min(5, importance))
     if not keyword.strip() or not content.strip():
         return
-    repo.upsert_memory(user_id, keyword, content, importance)
+    await repo.upsert_memory(user_id, keyword, content, importance)
 
 # ── 搜尋入口 ──────────────────────
 
@@ -183,7 +198,7 @@ class MemoryBundle:
         self.background = background
 
 
-def search(
+async def search(
     user_id: str,
     channel_id: str,
     query:   str,
@@ -204,14 +219,18 @@ def search(
         if now - ts < _cache_ttl():
             return bundle
 
-    background   = repo.load_background()
-    global_mems  = global_mems or []
-    raw_mems     = repo.get_memories_candidate(user_id, limit=_memory_candidate_limit())
-    all_memories = global_mems + background + raw_mems
+    global_mems = global_mems or []
 
-    raw_msgs     = repo.get_messages_candidate(user_id, channel_id, limit=_message_candidate_limit())
-    recent       = repo.get_recent_messages(user_id, channel_id, limit=_recent_message_limit())
-    summary      = repo.get_summary(user_id)
+    # 五個查詢彼此獨立（互不依賴對方的結果），用 asyncio.gather
+    # 平行執行，總等待時間取決於最慢的一個查詢，而非全部查詢時間總和。
+    background, raw_mems, raw_msgs, recent, summary = await asyncio.gather(
+        repo.load_background(),
+        repo.get_memories_candidate(user_id, limit=_memory_candidate_limit()),
+        repo.get_messages_candidate(user_id, channel_id, limit=_message_candidate_limit()),
+        repo.get_recent_messages(user_id, channel_id, limit=_recent_message_limit()),
+        repo.get_summary(user_id),
+    )
+    all_memories = global_mems + background + raw_mems
 
     from core.ai.ranker import optimize_context
     ctx = optimize_context(
@@ -232,12 +251,12 @@ def search(
     return bundle
 
 
-def get_recent(user_id: str, channel_id: str, limit: int = 12) -> list[tuple[str, str]]:
-    return repo.get_recent_messages(user_id, channel_id, limit)
+async def get_recent(user_id: str, channel_id: str, limit: int = 12) -> list[tuple[str, str]]:
+    return await repo.get_recent_messages(user_id, channel_id, limit)
 
 
-def get_summary_text(user_id: str) -> str:
-    return repo.get_summary(user_id)
+async def get_summary_text(user_id: str) -> str:
+    return await repo.get_summary(user_id)
 
 # ── 向量搜尋 ──────────────────────
 
@@ -252,7 +271,7 @@ async def search_semantic(
     if query_vec is None:
         return []
 
-    rows   = repo.get_all_vectors(user_id)
+    rows   = await repo.get_all_vectors(user_id)
     scored = []
     for r in rows:
         sim = _cosine(query_vec, r["embedding"])
@@ -308,7 +327,7 @@ async def _extract(user_id: str, user_input: str, ai_output: str) -> None:
                 imp = max(1, min(5, int(m.get("importance", 1))))
             except (TypeError, ValueError):
                 imp = 1
-            save_memory(user_id, kw, cnt, imp)
+            await save_memory(user_id, kw, cnt, imp)
             saved += 1
         if saved:
             logger.debug("[memory_manager] extract user=%s saved=%d", user_id, saved)
@@ -319,10 +338,10 @@ async def _extract(user_id: str, user_input: str, ai_output: str) -> None:
 
 
 async def _summarize_if_needed(user_id: str) -> None:
-    count = repo.count_messages(user_id)
+    count = await repo.count_messages(user_id)
     if count < _summary_trigger():
         return
-    messages = repo.get_messages_excluding_recent(user_id, _summary_keep())
+    messages = await repo.get_messages_excluding_recent(user_id, _summary_keep())
     if len(messages) < _summary_min_messages():
         return
     line_max_chars = _summary_line_max_chars()
@@ -342,7 +361,7 @@ async def _summarize_if_needed(user_id: str) -> None:
         )
         summary = (res.text or "").strip()
         if summary:
-            repo.upsert_summary(user_id, summary, count)
+            await repo.upsert_summary(user_id, summary, count)
             logger.info(
                 "[memory_manager] summary user=%s msg=%d len=%d",
                 user_id, count, len(summary),
@@ -356,16 +375,16 @@ async def _summarize_if_needed(user_id: str) -> None:
 async def _vectorize_recent(user_id: str, query: str) -> None:
     """向量化最近擷取到的記憶；延遲秒數由 settings.json 控制。"""
     await asyncio.sleep(_vectorize_delay_seconds())
-    mems = repo.get_memories_candidate(user_id, limit=_vector_candidate_limit())
+    mems = await repo.get_memories_candidate(user_id, limit=_vector_candidate_limit())
     for kw, content, imp in mems:
         vec = await _embed(f"{kw}: {content}")
         if vec:
-            repo.upsert_vector(user_id, kw, content, vec, imp)
+            await repo.upsert_vector(user_id, kw, content, vec, imp)
 
 
 async def force_summarize(user_id: str) -> str:
     """強制生成摘要（供管理指令使用）。"""
-    messages = repo.get_messages_excluding_recent(user_id, _summary_keep())
+    messages = await repo.get_messages_excluding_recent(user_id, _summary_keep())
     if not messages:
         return ""
     line_max_chars = _summary_line_max_chars()
@@ -385,7 +404,7 @@ async def force_summarize(user_id: str) -> str:
         )
         summary = (res.text or "").strip()
         if summary:
-            repo.upsert_summary(user_id, summary, len(messages))
+            await repo.upsert_summary(user_id, summary, len(messages))
         return summary
     except Exception as e:
         logger.debug("[memory_manager] force_summarize error: %s", e)

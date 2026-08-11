@@ -2,7 +2,24 @@
 core/ai/user_context.py
 
 Modification():
-- 統一檔案註解格式，保留原有職責說明。
+- 因應 database/repository/user_repository.py 全面套用
+  utils.async_db.to_thread，本檔幾乎每個函式都改為 async def 並
+  加上 await（get_tier / set_tier / is_banned / ban_user /
+  unban_user / get_interaction_count / increment_interaction /
+  get_user_info / get_user_context / get_global_memories /
+  set_global_memory / remove_global_memory / get_state / set_state /
+  extend_state / clear_state / state_to_prompt / get_profile /
+  update_profile / profile_to_prompt / dump_social）。get_tier_name
+  是純函式（只查內建的 TIER_NAMES dict），不涉及 I/O，維持同步。
+  get_user_info() / get_user_context() 內多個彼此獨立的查詢改用
+  asyncio.gather() 並行執行，而非依序 await，減少總等待時間。
+  dump_social() 原本直接繞過 repository 層自行開連線查詢三張表，
+  抽成 _dump_tiers_bans_interactions()（套用 to_thread）與
+  get_global_memories() 用 asyncio.gather 並行執行。
+  呼叫端（cogs/ai/ai_owner_commands.py、cogs/ai/dashboard.py、
+  core/ai/core.py、core/ai/tool_registry.py、
+  core/ai/context_manager.py、core/ai/admin_service.py）已逐一
+  同步更新為 await。
 
 修正（重構）：
 - 修正 from core import event_bus → from core.ai import event_bus（正確路徑）
@@ -34,6 +51,7 @@ import database.repository.user_repository as repo
 from core.ai.gemini_client import client
 from core.ai.json_utils import strip_json_fence
 from core.ai.models import MODELS
+from utils.async_db import to_thread
 
 # ── import 路徑修正（原路徑 from core import event_bus 為錯誤路徑） ──────────────────────
 from core.system import event_bus
@@ -82,13 +100,13 @@ class UserInfo:
 
 # ── 等級 ──────────────────────
 
-def get_tier(user_id: str) -> int:
-    return repo.get_tier(user_id)
+async def get_tier(user_id: str) -> int:
+    return await repo.get_tier(user_id)
 
 
-def set_tier(user_id: str, tier: int) -> None:
+async def set_tier(user_id: str, tier: int) -> None:
     tier = max(0, min(3, tier))
-    repo.set_tier(user_id, tier)
+    await repo.set_tier(user_id, tier)
     logger.info("[tier] user=%s → %s", user_id, TIER_NAMES[tier])
 
 
@@ -98,36 +116,37 @@ def get_tier_name(tier: int) -> str:
 
 # ── 封鎖 ──────────────────────
 
-def is_banned(user_id: str) -> bool:
-    return repo.is_banned(user_id)
+async def is_banned(user_id: str) -> bool:
+    return await repo.is_banned(user_id)
 
 
-def ban_user(user_id: str, reason: str = "") -> None:
-    repo.ban(user_id, reason)
+async def ban_user(user_id: str, reason: str = "") -> None:
+    await repo.ban(user_id, reason)
     logger.info("[ban] user=%s reason=%s", user_id, reason or "無說明")
 
 
-def unban_user(user_id: str) -> None:
-    repo.unban(user_id)
+async def unban_user(user_id: str) -> None:
+    await repo.unban(user_id)
     logger.info("[unban] user=%s", user_id)
 
 
 # ── 互動計數 ──────────────────────
 
-def get_interaction_count(user_id: str) -> int:
-    return repo.get_interaction_count(user_id)
+async def get_interaction_count(user_id: str) -> int:
+    return await repo.get_interaction_count(user_id)
 
 
-def increment_interaction(user_id: str) -> int:
-    return repo.increment_interaction(user_id)
+async def increment_interaction(user_id: str) -> int:
+    return await repo.increment_interaction(user_id)
 
 
 # ── 使用者資訊（統一入口） ──────────────────────
 
-def get_user_info(user_id: str, username: str = "") -> dict:
+async def get_user_info(user_id: str, username: str = "") -> dict:
     """供 build_prompt 使用的扁平 dict（向下相容舊呼叫方式）。"""
-    tier  = get_tier(user_id)
-    count = get_interaction_count(user_id)
+    tier, count = await asyncio.gather(
+        get_tier(user_id), get_interaction_count(user_id),
+    )
     return {
         "user_id":           user_id,
         "username":          username,
@@ -137,12 +156,14 @@ def get_user_info(user_id: str, username: str = "") -> dict:
     }
 
 
-def get_user_context(user_id: str, username: str = "") -> UserInfo:
+async def get_user_context(user_id: str, username: str = "") -> UserInfo:
     """完整使用者上下文，供 context_manager 使用。"""
-    tier    = get_tier(user_id)
-    count   = get_interaction_count(user_id)
-    state_d = get_state(user_id)
-    profile = get_profile(user_id)
+    tier, count, state_d, profile = await asyncio.gather(
+        get_tier(user_id),
+        get_interaction_count(user_id),
+        get_state(user_id),
+        get_profile(user_id),
+    )
     return UserInfo(
         user_id           = user_id,
         username          = username,
@@ -157,18 +178,18 @@ def get_user_context(user_id: str, username: str = "") -> UserInfo:
 
 # ── 全域記憶 ──────────────────────
 
-def get_global_memories() -> list[tuple[str, str, int]]:
-    return repo.list_global_memories()
+async def get_global_memories() -> list[tuple[str, str, int]]:
+    return await repo.list_global_memories()
 
 
-def set_global_memory(keyword: str, content: str, importance: int = 5) -> None:
+async def set_global_memory(keyword: str, content: str, importance: int = 5) -> None:
     importance = max(1, min(5, importance))
-    repo.upsert_global_memory(keyword, content, importance)
+    await repo.upsert_global_memory(keyword, content, importance)
     logger.info("[global_memory] upsert keyword=%s", keyword)
 
 
-def remove_global_memory(keyword: str) -> bool:
-    ok = repo.delete_global_memory(keyword)
+async def remove_global_memory(keyword: str) -> bool:
+    ok = await repo.delete_global_memory(keyword)
     if ok:
         logger.info("[global_memory] removed keyword=%s", keyword)
     return ok
@@ -176,9 +197,9 @@ def remove_global_memory(keyword: str) -> bool:
 
 # ── 對話狀態 ──────────────────────
 
-def get_state(user_id: str) -> dict:
+async def get_state(user_id: str) -> dict:
     """取得當前狀態，過期時回傳預設 normal。"""
-    row = repo.get_state_row(user_id)
+    row = await repo.get_state_row(user_id)
     if not row:
         return _default_state()
     if row["expires_at"] and row["expires_at"] < time.time():
@@ -190,7 +211,7 @@ def get_state(user_id: str) -> dict:
     }
 
 
-def set_state(
+async def set_state(
     user_id:     str,
     state:       str,
     context:     dict | None = None,
@@ -198,26 +219,26 @@ def set_state(
 ) -> None:
     context    = context or {}
     expires_at = time.time() + ttl_minutes * 60 if ttl_minutes > 0 else None
-    repo.upsert_state(user_id, state, context, expires_at)
+    await repo.upsert_state(user_id, state, context, expires_at)
     logger.info("[state] user=%s → %s (ttl=%dm)", user_id, state, ttl_minutes)
 
 
-def extend_state(user_id: str, ttl_minutes: int = _DEFAULT_TTL_MIN) -> None:
+async def extend_state(user_id: str, ttl_minutes: int = _DEFAULT_TTL_MIN) -> None:
     """每次互動延長 TTL（滑動視窗）。normal 狀態不延長。"""
-    current = get_state(user_id)
+    current = await get_state(user_id)
     if current["state"] == "normal":
         return
-    set_state(user_id, current["state"], current["context"], ttl_minutes)
+    await set_state(user_id, current["state"], current["context"], ttl_minutes)
 
 
-def clear_state(user_id: str) -> None:
-    repo.delete_state(user_id)
+async def clear_state(user_id: str) -> None:
+    await repo.delete_state(user_id)
     logger.info("[state] user=%s cleared", user_id)
 
 
-def state_to_prompt(user_id: str) -> str:
+async def state_to_prompt(user_id: str) -> str:
     """normal 或無 context 時回傳空字串。"""
-    s = get_state(user_id)
+    s = await get_state(user_id)
     if s["state"] == "normal" and not s["context"]:
         return ""
     lines = ["=== 當前狀態 ===", f"狀態：{s['label']}"]
@@ -232,20 +253,20 @@ def _default_state() -> dict:
 
 # ── 個人檔案 ──────────────────────
 
-def get_profile(user_id: str) -> dict:
-    return repo.get_profile(user_id)
+async def get_profile(user_id: str) -> dict:
+    return await repo.get_profile(user_id)
 
 
-def update_profile(user_id: str, key: str, value) -> None:
+async def update_profile(user_id: str, key: str, value) -> None:
     """手動更新 profile 單一欄位。"""
-    profile      = get_profile(user_id)
+    profile      = await get_profile(user_id)
     profile[key] = value
-    repo.save_profile(user_id, "", profile)
+    await repo.save_profile(user_id, "", profile)
 
 
-def profile_to_prompt(user_id: str) -> str:
+async def profile_to_prompt(user_id: str) -> str:
     """profile 為空時回傳空字串。"""
-    profile = get_profile(user_id)
+    profile = await get_profile(user_id)
     if not profile:
         return ""
     lines = []
@@ -290,7 +311,7 @@ async def update_profile_from_interaction(
         if not isinstance(updates, dict) or not updates:
             return
 
-        existing = get_profile(user_id)
+        existing = await get_profile(user_id)
         for k, v in updates.items():
             if k == "topics" and isinstance(v, list):
                 old = existing.get("topics", [])
@@ -298,7 +319,7 @@ async def update_profile_from_interaction(
             else:
                 existing[k] = v
 
-        repo.save_profile(user_id, username, existing)
+        await repo.save_profile(user_id, username, existing)
         logger.debug(
             "[user_context] profile updated user=%s fields=%s",
             user_id, list(updates),
@@ -311,10 +332,13 @@ async def update_profile_from_interaction(
 
 # ── 展示資料（供 $社交 指令使用） ──────────────────────
 
-def dump_social() -> dict:
+@to_thread
+def _dump_tiers_bans_interactions() -> tuple[dict, dict, dict]:
     """
-    回傳目前全部社交資料的快照，取代舊版 social._load()。
-    格式與舊版 JSON 結構相容，讓 owner.py 無需大改。
+    同步查詢部分：dump_social() 需要的三張表都是簡單的整表快照，
+    專屬於這一個組合檢視、不是通用的 repository 原語，因此留在
+    這裡而非另外新增到 user_repository.py，但仍套用 to_thread
+    裝飾器離開事件迴圈，與其餘所有資料庫存取保持一致的處理方式。
     """
     from database.ai.sqlite import get_connection
 
@@ -331,10 +355,21 @@ def dump_social() -> dict:
     interactions = {r["user_id"]: r["count"] for r in c.fetchall()}
 
     conn.close()
+    return tiers, bans, interactions
+
+
+async def dump_social() -> dict:
+    """
+    回傳目前全部社交資料的快照，取代舊版 social._load()。
+    格式與舊版 JSON 結構相容，讓 owner.py 無需大改。
+    """
+    (tiers, bans, interactions), global_memories = await asyncio.gather(
+        _dump_tiers_bans_interactions(), get_global_memories(),
+    )
 
     global_mems = [
         {"keyword": kw, "content": content, "importance": imp}
-        for kw, content, imp in get_global_memories()
+        for kw, content, imp in global_memories
     ]
 
     return {

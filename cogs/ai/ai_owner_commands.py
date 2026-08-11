@@ -60,7 +60,7 @@ class AiOwnerCommands(commands.Cog):
         if not 0 <= tier <= 3:
             await ctx.reply("等級必須介於 0~3")
             return
-        set_tier(str(member.id), tier)
+        await set_tier(str(member.id), tier)
         log_admin_action(
             actor_id=str(ctx.author.id), command="tier",
             target_id=str(member.id), detail=f"tier={tier}",
@@ -83,7 +83,7 @@ class AiOwnerCommands(commands.Cog):
     ) -> None:
         """$ban @使用者 [原因]"""
         uid = str(member.id)
-        ban_user(uid, reason)
+        await ban_user(uid, reason)
         log_admin_action(
             actor_id=str(ctx.author.id), command="ban",
             target_id=uid, detail=reason,
@@ -102,10 +102,10 @@ class AiOwnerCommands(commands.Cog):
     ) -> None:
         """$unban @使用者"""
         uid = str(member.id)
-        if not is_banned(uid):
+        if not await is_banned(uid):
             await ctx.reply(f"{member.display_name} 並未在封鎖名單中")
             return
-        unban_user(uid)
+        await unban_user(uid)
         log_admin_action(
             actor_id=str(ctx.author.id), command="unban", target_id=uid,
         )
@@ -122,10 +122,10 @@ class AiOwnerCommands(commands.Cog):
     ) -> None:
         """$unrestrict @使用者 — 解除系統自動施加的暫時限制（非永久封鎖）"""
         uid = str(member.id)
-        if not is_restricted(uid):
+        if not await is_restricted(uid):
             await ctx.reply(f"{member.display_name} 目前沒有暫時限制")
             return
-        clear_restriction(uid)
+        await clear_restriction(uid)
         log_admin_action(
             actor_id=str(ctx.author.id), command="unrestrict", target_id=uid,
         )
@@ -167,7 +167,7 @@ class AiOwnerCommands(commands.Cog):
             await ctx.reply("內容不可為空")
             return
 
-        set_global_memory(keyword, inner, importance)
+        await set_global_memory(keyword, inner, importance)
         log_admin_action(
             actor_id=str(ctx.author.id), command="memory.set",
             target_id=keyword, detail=f"importance={importance} content={inner[:60]}",
@@ -192,7 +192,7 @@ class AiOwnerCommands(commands.Cog):
         if not keyword:
             await ctx.reply("請提供關鍵字")
             return
-        if remove_global_memory(keyword):
+        if await remove_global_memory(keyword):
             log_admin_action(
                 actor_id=str(ctx.author.id), command="memory.del", target_id=keyword,
             )
@@ -206,7 +206,7 @@ class AiOwnerCommands(commands.Cog):
     @commands.is_owner()
     async def cmd_social(self, ctx: commands.Context) -> None:
         """$社交 — 顯示所有等級設定、封鎖名單、全域記憶、互動計數"""
-        data  = dump_social()
+        data  = await dump_social()
         lines: list[str] = []
 
         tiers = data.get("tiers", {})

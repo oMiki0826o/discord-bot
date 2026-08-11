@@ -44,7 +44,7 @@ def _reason_str(reason: str | None) -> str:
 async def _send_log(guild: discord.Guild, embed: discord.Embed) -> None:
     """將管理動作記錄發送至伺服器設定的 log 頻道。"""
     try:
-        settings = guild_repo.get_settings(guild.id)
+        settings = await guild_repo.get_settings(guild.id)
         ch_id    = settings.get("log_channel_id", 0)
         if not ch_id:
             return
@@ -134,7 +134,7 @@ class Moderation(commands.Cog):
             await interaction.response.send_message(f"封禁失敗：{e}", ephemeral=True)
             return
 
-        mod_repo.log_action(
+        await mod_repo.log_action(
             interaction.guild.id, "ban",
             str(member.id), str(interaction.user.id), reason_str,
         )
@@ -162,7 +162,7 @@ class Moderation(commands.Cog):
             await interaction.response.send_message("Bot 缺少解封權限", ephemeral=True)
             return
 
-        mod_repo.log_action(
+        await mod_repo.log_action(
             interaction.guild.id, "unban",
             user_id, str(interaction.user.id),
         )
@@ -200,7 +200,7 @@ class Moderation(commands.Cog):
             await interaction.response.send_message(f"踢出失敗：{e}", ephemeral=True)
             return
 
-        mod_repo.log_action(
+        await mod_repo.log_action(
             interaction.guild.id, "kick",
             str(member.id), str(interaction.user.id), reason_str,
         )
@@ -238,7 +238,7 @@ class Moderation(commands.Cog):
             await interaction.response.send_message(f"禁言失敗：{e}", ephemeral=True)
             return
 
-        mod_repo.log_action(
+        await mod_repo.log_action(
             interaction.guild.id, "mute",
             str(member.id), str(interaction.user.id), reason_str, duration,
         )
@@ -274,7 +274,7 @@ class Moderation(commands.Cog):
             await interaction.response.send_message(f"解除禁言失敗：{e}", ephemeral=True)
             return
 
-        mod_repo.log_action(
+        await mod_repo.log_action(
             interaction.guild.id, "unmute",
             str(member.id), str(interaction.user.id),
         )
@@ -307,7 +307,7 @@ class Moderation(commands.Cog):
             return
 
         reason_str = _reason_str(reason)
-        total      = mod_repo.add_warn(
+        total      = await mod_repo.add_warn(
             interaction.guild.id, str(member.id),
             str(interaction.user.id), reason_str,
         )
@@ -336,8 +336,8 @@ class Moderation(commands.Cog):
     @app_commands.command(name="warnings", description="查看成員的警告紀錄")
     @app_commands.default_permissions(moderate_members=True)
     async def cmd_warnings(self, interaction: discord.Interaction, member: discord.Member) -> None:
-        warns = mod_repo.get_warnings(interaction.guild.id, str(member.id))
-        total = mod_repo.count_warnings(interaction.guild.id, str(member.id))
+        warns = await mod_repo.get_warnings(interaction.guild.id, str(member.id))
+        total = await mod_repo.count_warnings(interaction.guild.id, str(member.id))
         embed = discord.Embed(
             title     = f"{member.display_name} 的警告紀錄",
             color     = discord.Color.orange(),
@@ -361,7 +361,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="clear_warns", description="清除成員所有警告紀錄")
     @app_commands.default_permissions(administrator=True)
     async def cmd_clear_warns(self, interaction: discord.Interaction, member: discord.Member) -> None:
-        deleted = mod_repo.clear_warnings(interaction.guild.id, str(member.id))
+        deleted = await mod_repo.clear_warnings(interaction.guild.id, str(member.id))
         await interaction.response.send_message(
             f"已清除 **{member.display_name}** 的 {deleted} 筆警告",
             ephemeral=True,
@@ -391,7 +391,7 @@ class Moderation(commands.Cog):
     @app_commands.command(name="modlog", description="查看最近 20 筆管理動作紀錄")
     @app_commands.default_permissions(moderate_members=True)
     async def cmd_modlog(self, interaction: discord.Interaction) -> None:
-        logs  = mod_repo.get_mod_log(interaction.guild.id, limit=20)
+        logs  = await mod_repo.get_mod_log(interaction.guild.id, limit=20)
         embed = discord.Embed(
             title     = "管理動作紀錄（最近 20 筆）",
             color     = discord.Color.blurple(),

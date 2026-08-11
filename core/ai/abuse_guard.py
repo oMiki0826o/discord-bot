@@ -3,6 +3,12 @@ core/ai/abuse_guard.py
 
 Modification():
 
+- check_and_record() / is_restricted() / clear_restriction() 改為
+  async def：因應 database/repository/user_repository.py 全面套用
+  utils.async_db.to_thread，這裡呼叫的 repo.get_temp_restriction() /
+  repo.set_temp_restriction() / repo.clear_temp_restriction() 都變成
+  需要 await 的函式。呼叫端（core/ai/core.py 的 check_abuse、
+  cogs/ai/ai_owner_commands.py 的 $unrestrict）已同步更新為 await。
 - 使用 get_int() 讀取視窗、門檻與限制分鐘數，避免設定轉型錯誤中斷請求。
 - 單次檢查只讀取一次設定值，降低重複查詢與 log 雜訊。
 - 保留滑動視窗與持久化暫時限制流程。
@@ -43,7 +49,7 @@ _request_log: dict[str, deque[float]] = defaultdict(deque)
 
 # ── 對外入口 ──────────────────────
 
-def check_and_record(user_id: str) -> tuple[bool, str | None]:
+async def check_and_record(user_id: str) -> tuple[bool, str | None]:
     """
     記錄本次請求並檢查是否允許繼續。
 
@@ -59,7 +65,7 @@ def check_and_record(user_id: str) -> tuple[bool, str | None]:
     restrict_minutes = max(1, get_int("ai.abuse_restrict_minutes", 10))
 
     # ── 1. 已有未過期的暫時限制 → 直接拒絕，不重複寫入 ──────────────────────
-    existing = repo.get_temp_restriction(user_id)
+    existing = await repo.get_temp_restriction(user_id)
     if existing and existing["expires_at"] > wall_now:
         remaining_min = int((existing["expires_at"] - wall_now) / 60) + 1
         return False, f"請求過於頻繁，暫時限制中，約 {remaining_min} 分鐘後解除"
@@ -76,7 +82,7 @@ def check_and_record(user_id: str) -> tuple[bool, str | None]:
     # ── 3. 超過門檻 → 觸發新的暫時限制 ──────────────────────
     expires_at = wall_now + restrict_minutes * 60
     reason = f"{window_seconds} 秒內請求 {len(window)} 次，超過門檻 {max_requests}"
-    repo.set_temp_restriction(user_id, reason, expires_at)
+    await repo.set_temp_restriction(user_id, reason, expires_at)
     window.clear()
 
     logger.error(
@@ -96,13 +102,13 @@ def check_and_record(user_id: str) -> tuple[bool, str | None]:
     return False, f"偵測到異常請求頻率，已暫時限制 {restrict_minutes} 分鐘"
 
 
-def is_restricted(user_id: str) -> bool:
+async def is_restricted(user_id: str) -> bool:
     """單純檢查目前是否仍在暫時限制中（不計入滑動視窗）。"""
-    existing = repo.get_temp_restriction(user_id)
+    existing = await repo.get_temp_restriction(user_id)
     return bool(existing and existing["expires_at"] > time.time())
 
 
-def clear_restriction(user_id: str) -> None:
+async def clear_restriction(user_id: str) -> None:
     """供 Owner 手動解除暫時限制（例如誤判時）。"""
-    repo.clear_temp_restriction(user_id)
+    await repo.clear_temp_restriction(user_id)
     logger.info("[abuse_guard] 已手動解除暫時限制 | user=%s", user_id)

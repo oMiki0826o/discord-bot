@@ -117,13 +117,13 @@ def do_cache_cleanup() -> tuple[dict, int, dict]:
 
 # ── 狀態管理 ──────────────────────
 
-def list_active_states() -> list[dict]:
+async def list_active_states() -> list[dict]:
     """
     取得所有非 normal 的有效狀態。
     回傳 [{"user_id", "state", "label", "expires_at"}, ...]
     """
     now  = time.time()
-    rows = user_repo.list_active_states(now)
+    rows = await user_repo.list_active_states(now)
     return [
         {
             "user_id":    r["user_id"],
@@ -137,9 +137,9 @@ def list_active_states() -> list[dict]:
 
 # ── 社交資料 ──────────────────────
 
-def get_social_dump() -> dict:
+async def get_social_dump() -> dict:
     """供 $社交 指令展示，取代舊版 social._load()。"""
-    return dump_social()
+    return await dump_social()
 
 
 # ── 模板管理（委派 prompt_builder） ──────────────────────
@@ -176,7 +176,7 @@ async def _on_admin_action(
     **_,
 ) -> None:
     """event_bus 觸發：寫入一筆管理指令操作紀錄。"""
-    audit_repo.insert_log(actor_id, command, target_id, detail)
+    await audit_repo.insert_log(actor_id, command, target_id, detail)
 
 
 def log_admin_action(
@@ -218,9 +218,9 @@ def log_admin_action(
     asyncio.create_task(coro)
 
 
-def get_audit_log(limit: int = 20) -> list[dict]:
+async def get_audit_log(limit: int = 20) -> list[dict]:
     """取得最近 N 筆管理指令操作紀錄，供 $dashboard audit 使用。"""
-    return audit_repo.get_recent(limit)
+    return await audit_repo.get_recent(limit)
 
 
 event_bus.on("admin_action", _on_admin_action)

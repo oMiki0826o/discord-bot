@@ -65,12 +65,12 @@ def _truncate(text: str, limit: int = 100) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-def _get_favorite_at(user_id: str, index: int) -> tuple[list[dict], dict | None]:
+async def _get_favorite_at(user_id: str, index: int) -> tuple[list[dict], dict | None]:
     """
     取得使用者完整收藏清單，以及 0-based 索引指定的項目。
     索引超出範圍時項目回傳 None，呼叫端應顯示「找不到該筆收藏」訊息。
     """
-    favs = fav_repo.get_favorites(user_id)
+    favs = await fav_repo.get_favorites(user_id)
     if 0 <= index < len(favs):
         return favs, favs[index]
     return favs, None
@@ -311,7 +311,7 @@ class FavMenuView(discord.ui.View):
         choice = select.values[0]
 
         if choice == "list":
-            favs = fav_repo.get_favorites(str(self.member.id))
+            favs = await fav_repo.get_favorites(str(self.member.id))
             await interaction.response.edit_message(
                 embed = _fav_embed(self.member, favs, 1),
                 view  = FavPager(self.member, favs, cog=self.cog),
@@ -369,7 +369,7 @@ class Favorites(commands.Cog):
             )
             return
 
-        added = fav_repo.add_favorite(
+        added = await fav_repo.add_favorite(
             str(interaction.user.id), song.title, song.webpage_url, song.duration,
         )
         embed = (
@@ -399,7 +399,7 @@ class Favorites(commands.Cog):
             )
             return
 
-        added = fav_repo.add_favorite(str(member.id), song.title, song.webpage_url, song.duration)
+        added = await fav_repo.add_favorite(str(member.id), song.title, song.webpage_url, song.duration)
         embed = (
             success_embed(f"已加入收藏：{song.title}") if added
             else info_embed(f"{song.title} 已在收藏清單中")
@@ -411,7 +411,7 @@ class Favorites(commands.Cog):
     @fav_group.command(name="list", description="查看個人收藏清單")
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     async def cmd_list(self, interaction: discord.Interaction) -> None:
-        favs = fav_repo.get_favorites(str(interaction.user.id))
+        favs = await fav_repo.get_favorites(str(interaction.user.id))
         await interaction.response.send_message(
             embed = _fav_embed(interaction.user, favs, 1),
             view  = FavPager(interaction.user, favs) if favs else None,
@@ -454,7 +454,7 @@ class Favorites(commands.Cog):
         from core.music.embeds import added_song_embed, error_embed, now_playing_embed
         from core.music.views  import MusicControls
 
-        _, fav = _get_favorite_at(str(member.id), index)
+        _, fav = await _get_favorite_at(str(member.id), index)
         if fav is None:
             return error_embed("找不到該筆收藏，可能已被移除或編號錯誤"), None
 
@@ -476,18 +476,18 @@ class Favorites(commands.Cog):
     @app_commands.describe(index="要移除的編號（可用 /fav list 確認）")
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     async def cmd_remove(self, interaction: discord.Interaction, index: int) -> None:
-        embed = self.remove_favorite_core(str(interaction.user.id), index - 1)
+        embed = await self.remove_favorite_core(str(interaction.user.id), index - 1)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    def remove_favorite_core(self, user_id: str, index: int) -> discord.Embed:
+    async def remove_favorite_core(self, user_id: str, index: int) -> discord.Embed:
         """執行「移除指定收藏」核心邏輯（0-based index），回傳結果 Embed。"""
         from core.music.embeds import error_embed, success_embed
 
-        _, fav = _get_favorite_at(user_id, index)
+        _, fav = await _get_favorite_at(user_id, index)
         if fav is None:
             return error_embed("找不到該筆收藏，可能已被移除或編號錯誤")
 
-        fav_repo.remove_favorite(user_id, fav["url"])
+        await fav_repo.remove_favorite(user_id, fav["url"])
         return success_embed(f"已移除收藏：{fav['title']}")
 
     # ── /fav clear ──────────────────────
@@ -495,7 +495,7 @@ class Favorites(commands.Cog):
     @fav_group.command(name="clear", description="清空個人收藏清單")
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     async def cmd_clear(self, interaction: discord.Interaction) -> None:
-        count = fav_repo.clear_favorites(str(interaction.user.id))
+        count = await fav_repo.clear_favorites(str(interaction.user.id))
         await interaction.response.send_message(
             f"已清空收藏清單（共 {count} 首）。", ephemeral=True,
         )
@@ -531,7 +531,7 @@ class Favorites(commands.Cog):
     ) -> None:
         from core.music.embeds import error_embed
 
-        favs = fav_repo.get_favorites(str(member.id))
+        favs = await fav_repo.get_favorites(str(member.id))
         if not favs:
             await interaction.response.edit_message(
                 embed=error_embed("收藏清單是空的，請先用「加入指定歌曲」新增"),
@@ -570,7 +570,7 @@ class Favorites(commands.Cog):
         member:      discord.User | discord.Member,
         index:       int,
     ) -> None:
-        embed = self.remove_favorite_core(str(member.id), index)
+        embed = await self.remove_favorite_core(str(member.id), index)
         await interaction.response.edit_message(embed=embed, view=_BackButtonView(self, member))
 
     # ── 選單分流：載入全部 ──────────────────────
@@ -584,7 +584,7 @@ class Favorites(commands.Cog):
             )
             return
 
-        favs = fav_repo.get_favorites(str(member.id))
+        favs = await fav_repo.get_favorites(str(member.id))
         if not favs:
             await interaction.response.edit_message(
                 embed=error_embed("收藏清單是空的"), view=_BackButtonView(self, member),

@@ -63,9 +63,9 @@ def _render_name(template: str, member: discord.Member) -> str:
     )
 
 
-def _get_channel_owner(channel: discord.VoiceChannel) -> str | None:
+async def _get_channel_owner(channel: discord.VoiceChannel) -> str | None:
     """從 DB 取得此頻道的擁有者 ID。"""
-    data = vc_repo.get_channel(channel.id)
+    data = await vc_repo.get_channel(channel.id)
     return data["owner_id"] if data else None
 
 
@@ -87,11 +87,11 @@ class VoiceChannel(commands.Cog):
         """
         cleaned = 0
         for guild in self.bot.guilds:
-            for entry in vc_repo.get_all_channels(guild.id):
+            for entry in await vc_repo.get_all_channels(guild.id):
                 channel = guild.get_channel(entry["channel_id"])
                 if channel is None:
                     # 頻道已不存在（可能 Bot 離線期間被手動刪除）
-                    vc_repo.delete_channel(entry["channel_id"])
+                    await vc_repo.delete_channel(entry["channel_id"])
                     cleaned += 1
                 elif isinstance(channel, discord.VoiceChannel) and len(channel.members) == 0:
                     # 頻道存在但已空
@@ -99,7 +99,7 @@ class VoiceChannel(commands.Cog):
                         await channel.delete(reason="Bot 重啟後清理空的臨時頻道")
                     except discord.HTTPException:
                         pass
-                    vc_repo.delete_channel(channel.id)
+                    await vc_repo.delete_channel(channel.id)
                     cleaned += 1
 
         if cleaned:
@@ -139,7 +139,7 @@ class VoiceChannel(commands.Cog):
         判斷加入的頻道是否為 JTC 觸發頻道。
         若是，建立臨時頻道並移入成員。
         """
-        settings = vc_repo.get_vc_settings(guild.id)
+        settings = await vc_repo.get_vc_settings(guild.id)
         create_id = settings.get("create_channel", 0) or int(_s_get('voice_channel.jtc_channel_id', 0))
 
         if not create_id or channel.id != create_id:
@@ -180,7 +180,7 @@ class VoiceChannel(commands.Cog):
         )
 
         # ── 寫入 DB ──────────────────────
-        vc_repo.create_channel(
+        await vc_repo.create_channel(
             channel_id = new_channel.id,
             guild_id   = guild.id,
             owner_id   = str(member.id),
@@ -196,7 +196,7 @@ class VoiceChannel(commands.Cog):
             await asyncio.sleep(0.5)
             if len(new_channel.members) == 0:
                 await new_channel.delete()
-                vc_repo.delete_channel(new_channel.id)
+                await vc_repo.delete_channel(new_channel.id)
             return
 
         logger.info("[voice.create] guild=%s channel=%s owner=%s", guild.name, ch_name, member)
@@ -209,7 +209,7 @@ class VoiceChannel(commands.Cog):
         """
         若離開的頻道是臨時頻道且已空，刪除並清理 DB。
         """
-        if not vc_repo.is_temp_channel(channel.id):
+        if not await vc_repo.is_temp_channel(channel.id):
             return
         if len(channel.members) > 0:
             return   # 還有人在
@@ -222,7 +222,7 @@ class VoiceChannel(commands.Cog):
             logger.warning("[voice] 刪除臨時頻道失敗: %s", e)
             return
 
-        vc_repo.delete_channel(channel.id)
+        await vc_repo.delete_channel(channel.id)
         logger.info("[voice.delete] guild=%s channel=%s（已空）", guild.name, channel.name)
 
     # ── Slash Command 群組 ──────────────────────
@@ -257,7 +257,7 @@ class VoiceChannel(commands.Cog):
             )
             return None
 
-        owner_id = _get_channel_owner(channel)
+        owner_id = await _get_channel_owner(channel)
         if owner_id is None:
             await interaction.response.send_message(
                 "您目前所在的頻道不是臨時頻道", ephemeral=True,
@@ -291,10 +291,10 @@ class VoiceChannel(commands.Cog):
         limit:       app_commands.Range[int, 0, 99] = 0,
     ) -> None:
         guild_id = interaction.guild.id
-        vc_repo.set_vc_setting(guild_id, "create_channel",  channel.id)
-        vc_repo.set_vc_setting(guild_id, "category_id",     category.id if category else 0)
-        vc_repo.set_vc_setting(guild_id, "name_template",   template)
-        vc_repo.set_vc_setting(guild_id, "default_limit",   limit)
+        await vc_repo.set_vc_setting(guild_id, "create_channel",  channel.id)
+        await vc_repo.set_vc_setting(guild_id, "category_id",     category.id if category else 0)
+        await vc_repo.set_vc_setting(guild_id, "name_template",   template)
+        await vc_repo.set_vc_setting(guild_id, "default_limit",   limit)
 
         desc_lines = [
             f"觸發頻道：**{channel.name}**",
@@ -333,7 +333,7 @@ class VoiceChannel(commands.Cog):
             await interaction.response.send_message(f"更名失敗：{e}", ephemeral=True)
             return
 
-        vc_repo.update_channel(channel.id, "name", name)
+        await vc_repo.update_channel(channel.id, "name", name)
         await interaction.response.send_message(f"頻道已更名為 **{name}**", ephemeral=True)
 
     # ── /vc limit ──────────────────────
@@ -355,7 +355,7 @@ class VoiceChannel(commands.Cog):
             await interaction.response.send_message(f"設定失敗：{e}", ephemeral=True)
             return
 
-        vc_repo.update_channel(channel.id, "user_limit", limit)
+        await vc_repo.update_channel(channel.id, "user_limit", limit)
         msg = f"人數上限已設為 **{limit}**" if limit else "人數上限已取消（無上限）"
         await interaction.response.send_message(msg, ephemeral=True)
 
@@ -376,7 +376,7 @@ class VoiceChannel(commands.Cog):
             await interaction.response.send_message(f"鎖定失敗：{e}", ephemeral=True)
             return
 
-        vc_repo.update_channel(channel.id, "is_locked", 1)
+        await vc_repo.update_channel(channel.id, "is_locked", 1)
         await interaction.response.send_message("頻道已鎖定，新成員無法進入", ephemeral=True)
 
     # ── /vc unlock ──────────────────────
@@ -396,7 +396,7 @@ class VoiceChannel(commands.Cog):
             await interaction.response.send_message(f"解鎖失敗：{e}", ephemeral=True)
             return
 
-        vc_repo.update_channel(channel.id, "is_locked", 0)
+        await vc_repo.update_channel(channel.id, "is_locked", 0)
         await interaction.response.send_message("頻道已解鎖", ephemeral=True)
 
     # ── /vc permit ──────────────────────
@@ -508,7 +508,7 @@ class VoiceChannel(commands.Cog):
             )
             return
 
-        vc_repo.update_channel(channel.id, "owner_id", str(member.id))
+        await vc_repo.update_channel(channel.id, "owner_id", str(member.id))
 
         # 移除舊擁有者的 move_members 權限，給予新擁有者
         try:
@@ -542,7 +542,7 @@ class VoiceChannel(commands.Cog):
             await interaction.response.send_message("此功能僅適用於語音頻道", ephemeral=True)
             return
 
-        data = vc_repo.get_channel(channel.id)
+        data = await vc_repo.get_channel(channel.id)
         if not data:
             await interaction.response.send_message("此頻道不是臨時頻道", ephemeral=True)
             return
@@ -572,7 +572,7 @@ class VoiceChannel(commands.Cog):
         interaction: discord.Interaction,
         channel:     discord.VoiceChannel,
     ) -> None:
-        if not vc_repo.is_temp_channel(channel.id):
+        if not await vc_repo.is_temp_channel(channel.id):
             await interaction.response.send_message("此頻道不是臨時頻道", ephemeral=True)
             return
 
@@ -582,7 +582,7 @@ class VoiceChannel(commands.Cog):
             await interaction.response.send_message(f"刪除失敗：{e}", ephemeral=True)
             return
 
-        vc_repo.delete_channel(channel.id)
+        await vc_repo.delete_channel(channel.id)
         await interaction.response.send_message(
             f"已強制刪除臨時頻道 **{channel.name}**", ephemeral=True,
         )

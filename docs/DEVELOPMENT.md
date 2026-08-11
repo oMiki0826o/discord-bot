@@ -201,6 +201,7 @@ discord-bot-main/
 │       └── vc_repository.py
 │
 ├── utils/                    # 跨模組工具
+│   ├── async_db.py                # to_thread 裝飾器，讓同步 SQLite 函式可用 await 呼叫
 │   ├── checks.py                  # 權限 check 工廠
 │   ├── discord_errors.py          # Discord 錯誤代碼轉換
 │   ├── formatter.py               # 格式化工具（時長等）
@@ -593,7 +594,21 @@ Google 官方後繼模型是 `gemini-embedding-001`，呼叫介面相容（只�
 
 ## Changelog
 
-### 本輪：log 問題修正 + 第三方稽核報告優先項目
+### 本輪：資料庫存取全面非同步化
+
+稽核報告中規模最大的一項：全專案約 60 個 SQLite 存取函式（`database/repository/` 底下 8 個檔案）原本全是同步函式，卻直接被 async 函式呼叫，等於每一次資料庫讀寫都會佔用事件迴圈直到查詢完成。新增 `utils/async_db.py` 提供 `to_thread` 裝飾器，讓 repository 函式定義時套用一次，呼叫端改用 `await` 呼叫、實際執行委派給背景執行緒池。`init_tables()` 系列函式不套用（只在啟動時執行一次，且已經整個被 `bot.py` 的 `await asyncio.to_thread(initialize)` 包住）。
+
+依規模由小到大逐一處理並各自完整測試：`audit_repository.py` → `favorites_repository.py` → `guild_repository.py` → `mod_repository.py` → `ticket_repository.py` → `vc_repository.py` → `user_repository.py`（19 個函式，連鎖影響 `core/ai/user_context.py`、`core/ai/abuse_guard.py`、`core/ai/admin_service.py` 幾乎整個服務層改為 async）→ `memory_repository.py`（14 個函式，`core/ai/memory_manager.py` 的 `search()` 全面非同步化）。
+
+**core/ai/memory_manager.py／context_manager.py**：`search()` 原本是同步函式，`context_manager.py` 用 `loop.run_in_executor()` 包一層丟到執行緒池執行；`search()` 內五個彼此獨立的查詢（background／記憶／訊息／最近對話／摘要）也是依序等待。改為 `search()` 本身是 `async def`，五個查詢改用 `asyncio.gather()` 平行執行，`context_manager.py` 不再需要 `run_in_executor` 包裝，直接 `await`，程式碼更簡單、平均延遲也更低。
+
+**core/ai/user_context.py**：`get_user_info()` / `get_user_context()` 內多個查詢同樣改用 `asyncio.gather()` 平行執行。`dump_social()` 原本繞過 repository 層自行開連線查詢三張表，抽成獨立的輔助函式並套用 `to_thread`，與其餘資料庫存取方式一致。
+
+**測試**：`tests/test_abuse_guard.py`、`tests/test_memory_manager.py` 改寫為 `asyncio.run()` 包裝呼叫；`tests/test_ai_multimodal_flow.py` 的 mock 函式（`get_user_info`／`memory_search` 等）改為 `async def`，因為 `await` 一個非 coroutine 的回傳值會直接拋出 `TypeError`，`asyncio.create_task()` 收到非 coroutine 也會直接拋出例外。全部修改逐檔完成後皆重新執行完整測試套件與 `ExtensionLoader` 全模組載入驗證，最終 78 項測試、26 個模組、47 個 Slash 指令全數正常。
+
+---
+
+### 上一輪：log 問題修正 + 第三方稽核報告優先項目
 
 使用者提供一份實際運作 20 小時、16.7MB 的真實 log 檔案，以及兩份第三方稽核報告（深度稽核、未來優化路線圖）。稽核報告條列的項目規模很大（含完整的 AutoMod／AntiRaid 系統、70+ 處同步 SQLite 呼叫的全面非同步化等，屬於數週等級的工程量），本輪聚焦處理 log 檔案暴露的具體問題，以及稽核報告中風險最高、範圍明確、可以在合理範圍內完成的項目；規模較大的架構性項目留在稽核報告與路線圖文件中，作為後續分階段處理的依據，不在本輪倉促處理，以免範圍過大反而引入新的錯誤。
 
@@ -616,7 +631,7 @@ Google 官方後繼模型是 `gemini-embedding-001`，呼叫介面相容（只�
 - **core/link_preview/http.py**：`build_client()` 新增 `follow_redirects` 參數（預設 `True`，其餘擷取器不受影響），供 `article.py` 需要手動驗證每一跳重定向時使用。
 
 **本輪暫不處理、留待後續分階段進行的項目**（詳見稽核報告與路線圖文件）：
-- 70+ 處同步 SQLite 呼叫尚未非同步化（規模較大，需要系統性設計而非逐一修補，貿然大範圍修改風險較高）
+- ~~70+ 處同步 SQLite 呼叫尚未非同步化~~ → 已於下一輪（見上方「資料庫存取全面非同步化」）完成
 - AutoMod／AntiRaid／AntiScam／新成員驗證系統（全新子系統，非既有程式碼修正範疇）
 - 錯誤訊息 ID 化、log 內容遮罩敏感資訊、CI 自動化等，屬於錦上添花但非緊急的項目
 

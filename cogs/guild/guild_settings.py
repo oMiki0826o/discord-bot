@@ -50,7 +50,7 @@ class GuildSettings(commands.Cog):
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
         guild    = member.guild
-        settings = guild_repo.get_settings(guild.id)
+        settings = await guild_repo.get_settings(guild.id)
 
         # 歡迎訊息
         ch_id = settings.get("welcome_channel_id", 0)
@@ -93,7 +93,7 @@ class GuildSettings(commands.Cog):
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member) -> None:
         guild    = member.guild
-        settings = guild_repo.get_settings(guild.id)
+        settings = await guild_repo.get_settings(guild.id)
 
         ch_id = settings.get("leave_channel_id", 0)
         if ch_id:
@@ -138,48 +138,48 @@ class GuildSettings(commands.Cog):
     @app_commands.describe(channel="歡迎頻道")
     @app_commands.default_permissions(administrator=True)
     async def cmd_welcome(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
-        guild_repo.set_setting(interaction.guild.id, "welcome_channel_id", channel.id)
+        await guild_repo.set_setting(interaction.guild.id, "welcome_channel_id", channel.id)
         await interaction.response.send_message(f"歡迎頻道已設定為 {channel.mention}", ephemeral=True)
 
     @server_group.command(name="leave", description="設定離開訊息頻道")
     @app_commands.describe(channel="離開訊息頻道")
     @app_commands.default_permissions(administrator=True)
     async def cmd_leave(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
-        guild_repo.set_setting(interaction.guild.id, "leave_channel_id", channel.id)
+        await guild_repo.set_setting(interaction.guild.id, "leave_channel_id", channel.id)
         await interaction.response.send_message(f"離開訊息頻道已設定為 {channel.mention}", ephemeral=True)
 
     @server_group.command(name="log", description="設定日誌頻道")
     @app_commands.describe(channel="日誌頻道")
     @app_commands.default_permissions(administrator=True)
     async def cmd_log(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
-        guild_repo.set_setting(interaction.guild.id, "log_channel_id", channel.id)
+        await guild_repo.set_setting(interaction.guild.id, "log_channel_id", channel.id)
         await interaction.response.send_message(f"日誌頻道已設定為 {channel.mention}", ephemeral=True)
 
     @server_group.command(name="autorole", description="設定新成員自動身份組（留空停用）")
     @app_commands.describe(role="自動身份組")
     @app_commands.default_permissions(administrator=True)
     async def cmd_autorole(self, interaction: discord.Interaction, role: discord.Role | None = None) -> None:
-        guild_repo.set_setting(interaction.guild.id, "auto_role_id", role.id if role else 0)
+        await guild_repo.set_setting(interaction.guild.id, "auto_role_id", role.id if role else 0)
         msg = f"自動身份組已設定為 {role.mention}" if role else "自動身份組已停用"
         await interaction.response.send_message(msg, ephemeral=True)
 
     @server_group.command(name="ticket_category", description="設定工單類別")
     @app_commands.default_permissions(administrator=True)
     async def cmd_ticket_category(self, interaction: discord.Interaction, category: discord.CategoryChannel) -> None:
-        guild_repo.set_setting(interaction.guild.id, "ticket_category_id", category.id)
+        await guild_repo.set_setting(interaction.guild.id, "ticket_category_id", category.id)
         await interaction.response.send_message(f"工單類別已設定為 **{category.name}**", ephemeral=True)
 
     @server_group.command(name="ticket_support", description="設定工單支援身份組（留空停用）")
     @app_commands.default_permissions(administrator=True)
     async def cmd_ticket_support(self, interaction: discord.Interaction, role: discord.Role | None = None) -> None:
-        guild_repo.set_setting(interaction.guild.id, "ticket_support_role", role.id if role else 0)
+        await guild_repo.set_setting(interaction.guild.id, "ticket_support_role", role.id if role else 0)
         msg = f"工單支援身份組已設定為 {role.mention}" if role else "工單支援身份組已停用"
         await interaction.response.send_message(msg, ephemeral=True)
 
     @server_group.command(name="info", description="查看目前的伺服器設定")
     @app_commands.default_permissions(manage_guild=True)
     async def cmd_info(self, interaction: discord.Interaction) -> None:
-        settings = guild_repo.get_settings(interaction.guild.id)
+        settings = await guild_repo.get_settings(interaction.guild.id)
         guild    = interaction.guild
 
         def ch_m(ch_id: int) -> str:
@@ -227,8 +227,8 @@ class GuildSettings(commands.Cog):
     @server_group.command(name="reset", description="重置所有伺服器設定為預設值")
     @app_commands.default_permissions(administrator=True)
     async def cmd_reset(self, interaction: discord.Interaction) -> None:
-        guild_repo.reset_settings(interaction.guild.id)
-        guild_repo.get_settings(interaction.guild.id)
+        await guild_repo.reset_settings(interaction.guild.id)
+        await guild_repo.get_settings(interaction.guild.id)
         await interaction.response.send_message("伺服器設定已重置為預設值", ephemeral=True)
 
 

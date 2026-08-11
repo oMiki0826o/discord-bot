@@ -233,12 +233,12 @@ async def generate(
     )
 
     # ── 封鎖檢查 ──────────────────────
-    if is_banned(user_id):
+    if await is_banned(user_id):
         logger.info("[blocked] user=%s", user_id)
         return "抱歉，我沒辦法回應你的提問。"
 
     # ── 異常請求頻率檢查（自動暫時限制，非 Owner 手動封鎖） ──────────────────────
-    allowed, restrict_reason = check_abuse(user_id)
+    allowed, restrict_reason = await check_abuse(user_id)
     if not allowed:
         logger.info("[abuse_guard] user=%s restricted: %s", user_id, restrict_reason)
         return restrict_reason or "請求過於頻繁，請稍後再試"
@@ -256,7 +256,7 @@ async def generate(
         return "請輸入有效的內容"
 
     # ── 社交資訊（log 用） ──────────────────────
-    user_info = get_user_info(user_id, username)
+    user_info = await get_user_info(user_id, username)
     logger.info(
         "[request] user=%s(%s) tier=%s interactions=%d",
         user_id, username,
@@ -369,9 +369,11 @@ async def generate(
         save_result(clean, text[:800])
 
     # ── 儲存對話歷史 ──────────────────────
-    save_message(user_id, "user",      clean,         channel_id)
-    save_message(user_id, "assistant", text[:2_000], channel_id)
-    increment_interaction(user_id)
+    await asyncio.gather(
+        save_message(user_id, "user",      clean,         channel_id),
+        save_message(user_id, "assistant", text[:2_000], channel_id),
+    )
+    await increment_interaction(user_id)
 
     # ── 觸發背景任務（透過 event_bus） ──────────────────────
     await event_bus.emit(

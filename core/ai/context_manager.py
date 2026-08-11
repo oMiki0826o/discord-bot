@@ -2,6 +2,13 @@
 core/ai/context_manager.py
 
 Modification():
+- 因應 core/ai/memory_manager.py 的 search() 全面非同步化（見該檔
+  Modification 說明），移除本檔原本的 _get_memory() 包裝函式：
+  該函式原本存在的唯一目的，是用 loop.run_in_executor() 把當時
+  仍是同步函式的 search() 丟到執行緒池執行，避免阻塞事件迴圈。
+  search() 現在本身就是 async def，會直接 await 每一次資料庫存取，
+  不再需要這層額外的執行緒池包裝，build() 內直接
+  asyncio.create_task(memory_search(...)) 排程即可。
 - _get_tools() 新增 channel_id 參數並往下傳給 execute_tools()：
   這是 tool_registry._exec_memory() 參數錯位 bug 修正鏈的最後一環——
   channel_id 從這裡開始才「存在」於 tool 執行的呼叫路徑上，
@@ -77,17 +84,17 @@ async def build(
     - files：file_parser 已解析完成的附件結果，由 chat.py 傳入，
       本函式只負責原樣放入 ContextBundle，不重新觸發解析
     """
-    user_info   = get_user_info(user_id, username)
-    global_mems = get_global_memories()
+    user_info   = await get_user_info(user_id, username)
+    global_mems = await get_global_memories()
 
     # ── 並行取得記憶與 tool 結果 ──────────────────────
-    mem_task  = asyncio.create_task(_get_memory(user_id, channel_id, clean, global_mems))
+    mem_task  = asyncio.create_task(memory_search(user_id, channel_id, clean, global_mems))
     tool_task = asyncio.create_task(_get_tools(route, user_id, channel_id, clean))
 
-    extend_state(user_id)   # 滑動 TTL
+    await extend_state(user_id)   # 滑動 TTL
 
-    state_sec   = state_to_prompt(user_id)
-    profile_sec = profile_to_prompt(user_id)
+    state_sec   = await state_to_prompt(user_id)
+    profile_sec = await profile_to_prompt(user_id)
 
     mem_bundle  = await mem_task
     tool_secs   = await tool_task
@@ -121,19 +128,6 @@ async def build(
     )
 
 # ── 內部工具 ──────────────────────
-
-async def _get_memory(
-    user_id: str,
-    channel_id: str,
-    query: str,
-    global_mems: list[tuple[str, str, int]],
-):
-    """非同步包裝同步記憶搜尋（避免阻塞 event loop）。"""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None, memory_search, user_id, channel_id, query, global_mems,
-    )
-
 
 async def _get_tools(
     route:      RouteDecision,

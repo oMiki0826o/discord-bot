@@ -128,7 +128,7 @@ async def _open_ticket(
         return
 
     # ── 最大開票數檢查 ──────────────────────
-    open_tickets = ticket_repo.get_open_tickets_by_user(guild.id, user_id)
+    open_tickets = await ticket_repo.get_open_tickets_by_user(guild.id, user_id)
     if len(open_tickets) >= int(_s_get('ticket.max_per_user', 1)):
         await interaction.response.send_message(
             f"您已有 {len(open_tickets)} 張開啟中的工單（上限 {int(_s_get('ticket.max_per_user', 1))} 張）",
@@ -137,9 +137,9 @@ async def _open_ticket(
         return
 
     # ── 取得工單序號與類別 ──────────────────────
-    ticket_num   = guild_repo.increment_ticket_count(guild.id)
+    ticket_num   = await guild_repo.increment_ticket_count(guild.id)
     channel_name = f"{_s_get('ticket.channel_prefix', 'ticket-')}{ticket_num:04d}"
-    settings     = guild_repo.get_settings(guild.id)
+    settings     = await guild_repo.get_settings(guild.id)
     category_id  = settings.get("ticket_category_id", 0)
     support_id   = settings.get("ticket_support_role", 0)
 
@@ -194,7 +194,7 @@ async def _open_ticket(
         return
 
     # ── 寫入 DB ──────────────────────
-    ticket_id = ticket_repo.create_ticket(
+    ticket_id = await ticket_repo.create_ticket(
         guild_id   = guild.id,
         channel_id = channel.id,
         user_id    = user_id,
@@ -242,7 +242,7 @@ async def _close_ticket(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("此指令僅限文字頻道使用", ephemeral=True)
         return
 
-    ticket = ticket_repo.get_ticket_by_channel(channel.id)
+    ticket = await ticket_repo.get_ticket_by_channel(channel.id)
     if not ticket:
         await interaction.response.send_message("此頻道不是工單頻道", ephemeral=True)
         return
@@ -251,7 +251,7 @@ async def _close_ticket(interaction: discord.Interaction) -> None:
         return
 
     closed_by = str(interaction.user.id)
-    ticket_repo.close_ticket(channel.id, closed_by)
+    await ticket_repo.close_ticket(channel.id, closed_by)
 
     await interaction.response.send_message(
         f"工單已由 {interaction.user.mention} 關閉，頻道將在 5 秒後封存或刪除",
@@ -262,7 +262,7 @@ async def _close_ticket(interaction: discord.Interaction) -> None:
     await asyncio.sleep(5)
 
     # ── 封存或刪除 ──────────────────────
-    settings     = guild_repo.get_settings(interaction.guild.id)
+    settings     = await guild_repo.get_settings(interaction.guild.id)
     archive_name = _s_get('ticket.archive_category', '')
 
     if archive_name:
@@ -342,7 +342,7 @@ class Ticket(commands.Cog):
             await interaction.response.send_message("此指令僅限文字頻道使用", ephemeral=True)
             return
 
-        if not ticket_repo.get_ticket_by_channel(channel.id):
+        if not await ticket_repo.get_ticket_by_channel(channel.id):
             await interaction.response.send_message("此頻道不是工單頻道", ephemeral=True)
             return
 
@@ -377,7 +377,7 @@ class Ticket(commands.Cog):
             await interaction.response.send_message("此指令僅限文字頻道使用", ephemeral=True)
             return
 
-        if not ticket_repo.get_ticket_by_channel(channel.id):
+        if not await ticket_repo.get_ticket_by_channel(channel.id):
             await interaction.response.send_message("此頻道不是工單頻道", ephemeral=True)
             return
 
@@ -397,7 +397,7 @@ class Ticket(commands.Cog):
     @ticket_group.command(name="stats", description="查看伺服器工單統計")
     @app_commands.default_permissions(moderate_members=True)
     async def cmd_stats(self, interaction: discord.Interaction) -> None:
-        stats = ticket_repo.get_guild_stats(interaction.guild.id)
+        stats = await ticket_repo.get_guild_stats(interaction.guild.id)
 
         embed = discord.Embed(
             title     = "工單統計",

@@ -2,7 +2,14 @@
 tests/test_memory_manager.py
 
 Modification():
-- 統一檔案註解格式，保留原有職責說明。
+- database/repository/memory_repository.py 全面套用
+  utils.async_db.to_thread，core/ai/memory_manager.py 的
+  save_message() / search() / get_recent() 也連帶改為 async def
+  （見該檔 Modification 說明）；load_background() 本身也套用了
+  to_thread。原本這裡直接同步呼叫這些函式，現在會拿到 coroutine
+  物件而非實際結果。比照全專案既有慣例（不依賴 pytest-asyncio），
+  在每個測試函式內定義 async def _test()，於函式最後用
+  asyncio.run(_test()) 執行。
 
 測試範圍刻意限制在「不會呼叫 Gemini API」的部分：
 - core.ai.memory_manager.save_message / search / get_recent
@@ -18,37 +25,50 @@ _extract() / _summarize_if_needed() / _vectorize_recent() 因為
 
 from __future__ import annotations
 
+import asyncio
+
 import core.ai.memory_manager as memory_manager
 import database.repository.memory_repository as mem_repo
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
 
 # ── channel_id 隔離（核心新功能的回歸測試） ──────────────────────
 
 def test_get_recent_filters_by_channel(fresh_db):
-    memory_manager.save_message("u1", "user", "頻道A的話", "channelA")
-    memory_manager.save_message("u1", "user", "頻道B的話", "channelB")
+    async def _test():
+        await memory_manager.save_message("u1", "user", "頻道A的話", "channelA")
+        await memory_manager.save_message("u1", "user", "頻道B的話", "channelB")
 
-    recent_a = memory_manager.get_recent("u1", "channelA")
-    recent_b = memory_manager.get_recent("u1", "channelB")
+        recent_a = await memory_manager.get_recent("u1", "channelA")
+        recent_b = await memory_manager.get_recent("u1", "channelB")
 
-    assert any("頻道A" in c for _, c in recent_a)
-    assert all("頻道B" not in c for _, c in recent_a)
-    assert any("頻道B" in c for _, c in recent_b)
-    assert all("頻道A" not in c for _, c in recent_b)
+        assert any("頻道A" in c for _, c in recent_a)
+        assert all("頻道B" not in c for _, c in recent_a)
+        assert any("頻道B" in c for _, c in recent_b)
+        assert all("頻道A" not in c for _, c in recent_b)
+
+    _run(_test())
 
 
 def test_search_does_not_leak_messages_across_channels(fresh_db):
-    memory_manager.save_message("u1", "user", "在A群組討論的祕密話題", "channelA")
-    memory_manager.save_message("u1", "user", "在B群組討論的另一個話題", "channelB")
+    async def _test():
+        await memory_manager.save_message("u1", "user", "在A群組討論的祕密話題", "channelA")
+        await memory_manager.save_message("u1", "user", "在B群組討論的另一個話題", "channelB")
 
-    bundle_a = memory_manager.search("u1", "channelA", "祕密話題")
-    bundle_b = memory_manager.search("u1", "channelB", "祕密話題")
+        bundle_a = await memory_manager.search("u1", "channelA", "祕密話題")
+        bundle_b = await memory_manager.search("u1", "channelB", "祕密話題")
 
-    a_contents = [c for _, c in bundle_a.messages] + [c for _, c in bundle_a.recent]
-    b_contents = [c for _, c in bundle_b.messages] + [c for _, c in bundle_b.recent]
+        a_contents = [c for _, c in bundle_a.messages] + [c for _, c in bundle_a.recent]
+        b_contents = [c for _, c in bundle_b.messages] + [c for _, c in bundle_b.recent]
 
-    assert any("A群組" in c for c in a_contents)
-    assert all("B群組" not in c for c in a_contents)
-    assert all("A群組" not in c for c in b_contents)
+        assert any("A群組" in c for c in a_contents)
+        assert all("B群組" not in c for c in a_contents)
+        assert all("A群組" not in c for c in b_contents)
+
+    _run(_test())
 
 
 def test_search_cache_key_distinguishes_channel(fresh_db):
@@ -56,13 +76,16 @@ def test_search_cache_key_distinguishes_channel(fresh_db):
     同一使用者、同一查詢字串，在不同頻道呼叫 search() 時，
     快取 key 必須包含 channel_id，否則會誤用對方頻道的快取結果。
     """
-    memory_manager._search_cache.clear()
-    memory_manager.search("u1", "channelA", "測試查詢")
-    memory_manager.search("u1", "channelB", "測試查詢")
+    async def _test():
+        memory_manager._search_cache.clear()
+        await memory_manager.search("u1", "channelA", "測試查詢")
+        await memory_manager.search("u1", "channelB", "測試查詢")
 
-    keys = list(memory_manager._search_cache.keys())
-    assert any(k.startswith("u1:channelA:") for k in keys)
-    assert any(k.startswith("u1:channelB:") for k in keys)
+        keys = list(memory_manager._search_cache.keys())
+        assert any(k.startswith("u1:channelA:") for k in keys)
+        assert any(k.startswith("u1:channelB:") for k in keys)
+
+    _run(_test())
 
 
 def test_count_messages_is_not_channel_filtered(fresh_db):
@@ -70,9 +93,12 @@ def test_count_messages_is_not_channel_filtered(fresh_db):
     count_messages() 刻意不依 channel_id 過濾（_MSG_LIMIT 清理與
     摘要觸發判斷以使用者整體為單位），確認這個設計沒有被意外改動。
     """
-    memory_manager.save_message("u1", "user", "頻道A訊息", "channelA")
-    memory_manager.save_message("u1", "user", "頻道B訊息", "channelB")
-    assert mem_repo.count_messages("u1") == 2
+    async def _test():
+        await memory_manager.save_message("u1", "user", "頻道A訊息", "channelA")
+        await memory_manager.save_message("u1", "user", "頻道B訊息", "channelB")
+        assert await mem_repo.count_messages("u1") == 2
+
+    _run(_test())
 
 
 # ── load_background() 格式解析（修正 lstrip/rstrip 同類問題後的回歸測試） ──────────────────────
@@ -89,7 +115,7 @@ def test_load_background_parses_section_headers(tmp_path, monkeypatch):
     bg_file.write_text(content, encoding="utf-8")
     monkeypatch.setattr(mem_repo, "_BG_FILE", bg_file)
 
-    result = mem_repo.load_background()
+    result = _run(mem_repo.load_background())
     keywords = [kw for kw, _, _ in result]
     assert "基本設定" in keywords
     assert "其他設定" in keywords
@@ -101,7 +127,7 @@ def test_load_background_keeps_intro_text_before_first_header(tmp_path, monkeypa
     bg_file.write_text(content, encoding="utf-8")
     monkeypatch.setattr(mem_repo, "_BG_FILE", bg_file)
 
-    result = mem_repo.load_background()
+    result = _run(mem_repo.load_background())
     assert result[0][0] == "intro"
     assert "開頭簡介文字" in result[0][1]
 
@@ -112,7 +138,7 @@ def test_load_background_backward_compatible_key_value_format(tmp_path, monkeypa
     bg_file.write_text(content, encoding="utf-8")
     monkeypatch.setattr(mem_repo, "_BG_FILE", bg_file)
 
-    result = mem_repo.load_background()
+    result = _run(mem_repo.load_background())
     as_dict = {kw: content for kw, content, _ in result}
     assert as_dict.get("name") == "測試名稱"
     assert as_dict.get("role") == "測試角色"
@@ -129,7 +155,7 @@ def test_load_background_freeform_fallback_when_no_format_detected(tmp_path, mon
     bg_file.write_text(content, encoding="utf-8")
     monkeypatch.setattr(mem_repo, "_BG_FILE", bg_file)
 
-    result = mem_repo.load_background()
+    result = _run(mem_repo.load_background())
     assert len(result) == 1
     assert result[0][0] == "background"
     assert "完全沒有任何特殊格式" in result[0][1]
@@ -137,11 +163,11 @@ def test_load_background_freeform_fallback_when_no_format_detected(tmp_path, mon
 
 def test_load_background_missing_file_returns_empty_list(tmp_path, monkeypatch):
     monkeypatch.setattr(mem_repo, "_BG_FILE", tmp_path / "does_not_exist.txt")
-    assert mem_repo.load_background() == []
+    assert _run(mem_repo.load_background()) == []
 
 
 def test_load_background_empty_file_returns_empty_list(tmp_path, monkeypatch):
     bg_file = tmp_path / "background.txt"
     bg_file.write_text("", encoding="utf-8")
     monkeypatch.setattr(mem_repo, "_BG_FILE", bg_file)
-    assert mem_repo.load_background() == []
+    assert _run(mem_repo.load_background()) == []

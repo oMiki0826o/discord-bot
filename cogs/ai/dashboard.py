@@ -216,7 +216,7 @@ class Dashboard(commands.Cog):
     @commands.is_owner()
     async def cmd_dash_state(self, ctx: commands.Context) -> None:
         """$dashboard state — 列出所有非 normal 的對話狀態"""
-        states = list_active_states()
+        states = await list_active_states()
 
         embed = discord.Embed(
             title     = "對話狀態總覽",
@@ -248,7 +248,7 @@ class Dashboard(commands.Cog):
         member: discord.Member,
     ) -> None:
         """$dashboard clear @使用者 — 清除指定使用者的對話狀態"""
-        clear_state(str(member.id))
+        await clear_state(str(member.id))
         log_admin_action(
             actor_id=str(ctx.author.id), command="dashboard.clear",
             target_id=str(member.id),
@@ -336,7 +336,7 @@ class Dashboard(commands.Cog):
     @commands.is_owner()
     async def cmd_dash_audit(self, ctx: commands.Context) -> None:
         """$dashboard audit — 顯示最近 20 筆管理指令操作紀錄"""
-        logs = get_audit_log(limit=20)
+        logs = await get_audit_log(limit=20)
 
         embed = discord.Embed(
             title     = "管理指令操作紀錄（最近 20 筆）",
