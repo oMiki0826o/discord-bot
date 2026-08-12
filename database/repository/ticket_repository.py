@@ -8,6 +8,14 @@ database/repository/ticket_repository.py
 
 Modification():
 
+- create_ticket() / close_ticket() / get_ticket_by_channel() /
+  get_open_tickets_by_user() / get_guild_stats() 套用
+  utils.async_db.to_thread 裝飾器：這些函式在工單相關指令執行時
+  會被頻繁呼叫，原本是同步函式卻直接被 async 函式呼叫，改為透過
+  await 呼叫，實際執行委派給背景執行緒池。呼叫端
+  （cogs/ticket/ticket.py）同步更新為 await。
+  init_tables() 不套用：只在模組載入時執行一次，且已經整個被
+  bot.py 的 `await asyncio.to_thread(initialize)` 包住執行。
 - 全新建立，對應 cogs/ticket/ticket.py 的資料需求
 - 使用 UPSERT 避免重複插入
 - 工單狀態：open / closed
@@ -17,6 +25,7 @@ Modification():
 from __future__ import annotations
 
 from database.ai.sqlite import get_connection
+from utils.async_db import to_thread
 
 
 # ── 初始化 ──────────────────────
@@ -47,6 +56,7 @@ def init_tables() -> None:
 
 # ── 寫入 ──────────────────────
 
+@to_thread
 def create_ticket(
     guild_id:   int,
     channel_id: int,
@@ -71,6 +81,7 @@ def create_ticket(
     return ticket_id
 
 
+@to_thread
 def close_ticket(channel_id: int, closed_by: str) -> bool:
     """
     將指定頻道的工單標記為 closed。
@@ -94,6 +105,7 @@ def close_ticket(channel_id: int, closed_by: str) -> bool:
 
 # ── 查詢 ──────────────────────
 
+@to_thread
 def get_ticket_by_channel(channel_id: int) -> dict | None:
     """依頻道 ID 查詢工單，找不到回傳 None。"""
     conn = get_connection()
@@ -107,6 +119,7 @@ def get_ticket_by_channel(channel_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+@to_thread
 def get_open_tickets_by_user(guild_id: int, user_id: str) -> list[dict]:
     """取得指定使用者在伺服器中所有尚未關閉的工單。"""
     conn = get_connection()
@@ -124,6 +137,7 @@ def get_open_tickets_by_user(guild_id: int, user_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+@to_thread
 def get_guild_stats(guild_id: int) -> dict:
     """取得伺服器工單統計資料，供 $ticket stats 使用。"""
     conn = get_connection()

@@ -7,6 +7,17 @@ database/repository/favorites_repository.py
 
 Modification():
 
+- add_favorite() / remove_favorite() / clear_favorites() /
+  get_favorites() / is_favorite() 套用 utils.async_db.to_thread
+  裝飾器：這些函式會在 Bot 正常運作期間被重複呼叫（每次 /fav
+  相關指令），原本是同步函式卻直接被 async 函式呼叫，等於每次
+  呼叫都會佔用事件迴圈直到 SQLite 查詢完成。呼叫端
+  （cogs/utility/favorites.py）同步更新為 await；其中
+  remove_favorite_core() 與 _get_favorite_at() 兩個原本是同步的
+  輔助函式，因為改為呼叫這裡新增的 async 函式，也一併改為 async，
+  並更新它們自己的呼叫端。
+  init_tables() 不套用：只在模組載入時執行一次，且已經整個被
+  bot.py 的 `await asyncio.to_thread(initialize)` 包住執行。
 - 移植自 Bot-Firefly core/music/favorites.py（原為 JSON 檔案）
 - 改用 SQLite，保持與其他 Repository 一致的設計模式
 
@@ -15,6 +26,7 @@ Modification():
 from __future__ import annotations
 
 from database.ai.sqlite import get_connection
+from utils.async_db import to_thread
 
 
 # ── 初始化 ──────────────────────
@@ -41,6 +53,7 @@ def init_tables() -> None:
 
 # ── 新增 ──────────────────────
 
+@to_thread
 def add_favorite(user_id: str, title: str, url: str, duration: int = 0) -> bool:
     """新增收藏，已存在時回傳 False。"""
     try:
@@ -59,6 +72,7 @@ def add_favorite(user_id: str, title: str, url: str, duration: int = 0) -> bool:
 
 # ── 刪除 ──────────────────────
 
+@to_thread
 def remove_favorite(user_id: str, url: str) -> bool:
     conn = get_connection()
     conn.execute(
@@ -71,6 +85,7 @@ def remove_favorite(user_id: str, url: str) -> bool:
     return changed
 
 
+@to_thread
 def clear_favorites(user_id: str) -> int:
     conn = get_connection()
     conn.execute("DELETE FROM music_favorites WHERE user_id = ?", (user_id,))
@@ -82,6 +97,7 @@ def clear_favorites(user_id: str) -> int:
 
 # ── 查詢 ──────────────────────
 
+@to_thread
 def get_favorites(user_id: str) -> list[dict]:
     conn = get_connection()
     rows = conn.execute(
@@ -92,6 +108,7 @@ def get_favorites(user_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+@to_thread
 def is_favorite(user_id: str, url: str) -> bool:
     conn = get_connection()
     row  = conn.execute(

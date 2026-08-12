@@ -8,6 +8,15 @@ database/repository/vc_repository.py
 
 Modification():
 
+- get_vc_settings() / set_vc_setting() / create_channel() /
+  delete_channel() / get_channel() / get_all_channels() /
+  update_channel() / is_temp_channel() 套用 utils.async_db.to_thread
+  裝飾器：這是所有 Repository 中呼叫端最多的一個（voice_channel.py
+  內超過 20 處），原本全是同步函式卻直接被 async 的事件處理器與
+  指令處理器呼叫。改為透過 await 呼叫，實際執行委派給背景執行緒池。
+  呼叫端（cogs/voice/voice_channel.py）同步更新為 await。
+  init_tables() 不套用：只在模組載入時執行一次，且已經整個被
+  bot.py 的 `await asyncio.to_thread(initialize)` 包住執行。
 - 全新建立，對應 cogs/voice/voice_channel.py 的資料需求
 - guild_vc_settings 儲存每個伺服器的 JTC 設定（觸發頻道、類別、範本）
 - temp_voice_channels 記錄所有現存的臨時頻道
@@ -18,6 +27,7 @@ from __future__ import annotations
 
 
 from database.ai.sqlite import get_connection
+from utils.async_db import to_thread
 
 
 # ── 初始化 ──────────────────────
@@ -53,6 +63,7 @@ def init_tables() -> None:
 
 # ── 伺服器 JTC 設定 ──────────────────────
 
+@to_thread
 def get_vc_settings(guild_id: int) -> dict:
     """
     取得伺服器的 JTC 設定。
@@ -75,6 +86,7 @@ def get_vc_settings(guild_id: int) -> dict:
     }
 
 
+@to_thread
 def set_vc_setting(guild_id: int, key: str, value) -> None:
     """更新 JTC 設定的單一欄位。"""
     _ALLOWED = frozenset({
@@ -100,6 +112,7 @@ def set_vc_setting(guild_id: int, key: str, value) -> None:
 
 # ── 臨時語音頻道 ──────────────────────
 
+@to_thread
 def create_channel(
     channel_id: int,
     guild_id:   int,
@@ -121,6 +134,7 @@ def create_channel(
     conn.close()
 
 
+@to_thread
 def delete_channel(channel_id: int) -> None:
     """從資料庫移除臨時語音頻道紀錄（頻道刪除後呼叫）。"""
     conn = get_connection()
@@ -132,6 +146,7 @@ def delete_channel(channel_id: int) -> None:
     conn.close()
 
 
+@to_thread
 def get_channel(channel_id: int) -> dict | None:
     """依頻道 ID 查詢臨時頻道資料，找不到回傳 None。"""
     conn = get_connection()
@@ -145,6 +160,7 @@ def get_channel(channel_id: int) -> dict | None:
     return dict(row) if row else None
 
 
+@to_thread
 def get_all_channels(guild_id: int) -> list[dict]:
     """取得伺服器所有現存的臨時語音頻道（用於重啟後清理）。"""
     conn = get_connection()
@@ -158,6 +174,7 @@ def get_all_channels(guild_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+@to_thread
 def update_channel(channel_id: int, key: str, value) -> None:
     """更新臨時頻道的單一屬性。"""
     _ALLOWED = frozenset({"owner_id", "name", "user_limit", "is_locked"})
@@ -177,6 +194,7 @@ def update_channel(channel_id: int, key: str, value) -> None:
     conn.close()
 
 
+@to_thread
 def is_temp_channel(channel_id: int) -> bool:
     """快速判斷頻道是否為本系統管理的臨時頻道。"""
     conn = get_connection()

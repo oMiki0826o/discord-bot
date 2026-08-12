@@ -2,7 +2,20 @@
 database/repository/memory_repository.py
 
 Modification():
-- 統一檔案註解格式，保留原有職責說明。
+- 全部 14 個非 init_tables 函式套用 utils.async_db.to_thread 裝飾器
+  （包含 load_background()：雖然讀的是檔案而非資料庫，但檔案 I/O
+  同樣是同步、會阻塞事件迴圈的操作，套用同一套機制一併處理）。
+  這是全專案 Repository 中呼叫頻率最高的一個，每一次 AI 對話都會
+  觸發訊息儲存與記憶查詢。原本全是同步函式卻直接被 async 函式
+  呼叫，改為透過 await 呼叫，實際執行委派給背景執行緒池。
+  呼叫端主要是 core/ai/memory_manager.py，該檔案原本用
+  loop.run_in_executor() 把整個同步的 search() 函式丟到執行緒池
+  執行，等於是「用一個大執行緒池呼叫包住很多次資料庫存取」；
+  現在改為 search() 本身就是 async def，直接 await 每一次資料庫
+  存取，不再需要外層的 run_in_executor 包裝，呼叫端
+  （core/ai/context_manager.py）也一併簡化。
+  init_tables() 不套用：只在模組載入時執行一次，且已經整個被
+  bot.py 的 `await asyncio.to_thread(initialize)` 包住執行。
 
 職責：
 - 訊息、長期記憶、向量記憶、摘要的純 SQL 查詢層
@@ -52,6 +65,7 @@ import re
 from pathlib import Path
 
 from database.ai.sqlite import get_connection
+from utils.async_db import to_thread
 
 # ── 常數 ──────────────────────
 
@@ -125,6 +139,7 @@ def init_tables() -> None:
 
 # ── Messages ──────────────────────
 
+@to_thread
 def insert_message(user_id: str, role: str, content: str, channel_id: str = "") -> None:
     """
     插入訊息，超過 _MSG_LIMIT 自動刪除最舊紀錄。
@@ -166,6 +181,7 @@ def insert_message(user_id: str, role: str, content: str, channel_id: str = "") 
     conn.close()
 
 
+@to_thread
 def get_recent_messages(
     user_id: str, channel_id: str, limit: int = 12,
 ) -> list[tuple[str, str]]:
@@ -187,6 +203,7 @@ def get_recent_messages(
     return [(r["role"], r["content"]) for r in reversed(rows)]
 
 
+@to_thread
 def get_messages_candidate(
     user_id: str, channel_id: str, limit: int = 200,
 ) -> list[tuple[str, str]]:
@@ -207,6 +224,7 @@ def get_messages_candidate(
     return [(r["role"], r["content"]) for r in rows]
 
 
+@to_thread
 def count_messages(user_id: str) -> int:
     """使用者全部頻道的訊息總數（供 _MSG_LIMIT 清理與摘要觸發判斷）。"""
     conn = get_connection()
@@ -217,6 +235,7 @@ def count_messages(user_id: str) -> int:
     return n
 
 
+@to_thread
 def get_messages_excluding_recent(
     user_id: str, keep_recent: int,
 ) -> list[tuple[str, str]]:
@@ -246,6 +265,7 @@ def get_messages_excluding_recent(
 
 # ── Memories ──────────────────────
 
+@to_thread
 def upsert_memory(
     user_id:    str,
     keyword:    str,
@@ -268,6 +288,7 @@ def upsert_memory(
     conn.close()
 
 
+@to_thread
 def get_memories_candidate(
     user_id: str, limit: int = 30,
 ) -> list[tuple[str, str, int]]:
@@ -289,6 +310,7 @@ def get_memories_candidate(
 
 # ── Vector Memories ──────────────────────
 
+@to_thread
 def upsert_vector(
     user_id:    str,
     keyword:    str,
@@ -313,6 +335,7 @@ def upsert_vector(
     conn.close()
 
 
+@to_thread
 def get_all_vectors(user_id: str) -> list[dict]:
     """取出所有向量記憶（keyword, content, importance, embedding）。"""
     conn = get_connection()
@@ -337,6 +360,7 @@ def get_all_vectors(user_id: str) -> list[dict]:
     return result
 
 
+@to_thread
 def count_vectors(user_id: str = "") -> int:
     conn = get_connection()
     c    = conn.cursor()
@@ -352,6 +376,7 @@ def count_vectors(user_id: str = "") -> int:
 
 # ── Summaries ──────────────────────
 
+@to_thread
 def get_summary(user_id: str) -> str:
     conn = get_connection()
     c    = conn.cursor()
@@ -361,6 +386,7 @@ def get_summary(user_id: str) -> str:
     return row["summary"] if row else ""
 
 
+@to_thread
 def upsert_summary(user_id: str, summary: str, msg_count: int) -> None:
     conn = get_connection()
     conn.execute(
@@ -378,6 +404,7 @@ def upsert_summary(user_id: str, summary: str, msg_count: int) -> None:
     conn.close()
 
 
+@to_thread
 def count_summaries() -> int:
     conn = get_connection()
     c    = conn.cursor()
@@ -392,6 +419,7 @@ def count_summaries() -> int:
 _SECTION_RE = re.compile(r"^【(.+?)】\s*$")
 
 
+@to_thread
 def load_background() -> list[tuple[str, str, int]]:
     """
     讀取 database/ai/background.txt。

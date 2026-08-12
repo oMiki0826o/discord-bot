@@ -8,6 +8,13 @@ database/repository/mod_repository.py
 
 Modification():
 
+- add_warn() / get_warnings() / count_warnings() / clear_warnings() /
+  log_action() / get_mod_log() 套用 utils.async_db.to_thread 裝飾器：
+  這些函式在管理指令執行時會被呼叫，原本是同步函式卻直接被 async
+  函式呼叫，改為透過 await 呼叫，實際執行委派給背景執行緒池，不
+  阻塞事件迴圈。呼叫端（cogs/moderation/mod.py）同步更新為 await。
+  init_tables() 不套用：只在模組載入時執行一次，且已經整個被
+  bot.py 的 `await asyncio.to_thread(initialize)` 包住執行。
 - 全新建立，對應 cogs/moderation/mod.py 的資料需求
 - warn_log 紀錄每一次警告（可累計檢視違規歷史）
 - 所有操作均記錄操作者（moderator_id）
@@ -17,6 +24,7 @@ Modification():
 from __future__ import annotations
 
 from database.ai.sqlite import get_connection
+from utils.async_db import to_thread
 
 
 # ── 初始化 ──────────────────────
@@ -55,6 +63,7 @@ def init_tables() -> None:
 
 # ── 警告 ──────────────────────
 
+@to_thread
 def add_warn(
     guild_id:     int,
     user_id:      str,
@@ -83,6 +92,7 @@ def add_warn(
     return count
 
 
+@to_thread
 def get_warnings(guild_id: int, user_id: str, limit: int = 10) -> list[dict]:
     """取得指定使用者的警告紀錄（最新在前）。"""
     conn = get_connection()
@@ -102,6 +112,7 @@ def get_warnings(guild_id: int, user_id: str, limit: int = 10) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+@to_thread
 def count_warnings(guild_id: int, user_id: str) -> int:
     """回傳使用者在伺服器的累計警告次數。"""
     conn = get_connection()
@@ -115,6 +126,7 @@ def count_warnings(guild_id: int, user_id: str) -> int:
     return count
 
 
+@to_thread
 def clear_warnings(guild_id: int, user_id: str) -> int:
     """清除使用者所有警告，回傳被清除的筆數。"""
     conn = get_connection()
@@ -131,6 +143,7 @@ def clear_warnings(guild_id: int, user_id: str) -> int:
 
 # ── 管理動作記錄 ──────────────────────
 
+@to_thread
 def log_action(
     guild_id:     int,
     action:       str,
@@ -155,6 +168,7 @@ def log_action(
     conn.close()
 
 
+@to_thread
 def get_mod_log(guild_id: int, limit: int = 20) -> list[dict]:
     """取得伺服器最近的管理動作紀錄（最新在前）。"""
     conn = get_connection()

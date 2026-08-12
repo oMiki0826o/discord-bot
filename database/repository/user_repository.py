@@ -2,7 +2,16 @@
 database/repository/user_repository.py
 
 Modification():
-- 統一檔案註解格式，保留原有職責說明。
+- 全部 19 個非 init_tables 函式套用 utils.async_db.to_thread 裝飾器：
+  這是全專案 Repository 中函式數量最多的一個，涵蓋 tier／封鎖／
+  暫時限制／互動計數／全域記憶／個人檔案／對話狀態，幾乎每次
+  AI 對話與多個管理指令都會呼叫。原本全是同步函式卻直接被 async
+  函式呼叫，改為透過 await 呼叫，實際執行委派給背景執行緒池。
+  呼叫端遍布 core/ai（agent_router、context_manager、
+  memory_manager、abuse_guard、user_context、admin_service）與
+  多個 cogs，已逐一同步更新為 await。
+  init_tables() 不套用：只在模組載入時執行一次，且已經整個被
+  bot.py 的 `await asyncio.to_thread(initialize)` 包住執行。
 
 職責：
 - 使用者資料的純 SQL 查詢層（Repository Pattern）
@@ -28,6 +37,7 @@ from __future__ import annotations
 import json
 
 from database.ai.sqlite import get_connection
+from utils.async_db import to_thread
 
 # ── 初始化 ──────────────────────
 
@@ -81,6 +91,7 @@ def init_tables() -> None:
 
 # ── Tier ──────────────────────
 
+@to_thread
 def get_tier(user_id: str) -> int:
     conn = get_connection()
     c    = conn.cursor()
@@ -90,6 +101,7 @@ def get_tier(user_id: str) -> int:
     return row["tier"] if row else 0
 
 
+@to_thread
 def set_tier(user_id: str, tier: int) -> None:
     conn = get_connection()
     conn.execute(
@@ -107,6 +119,7 @@ def set_tier(user_id: str, tier: int) -> None:
 
 # ── Ban ──────────────────────
 
+@to_thread
 def is_banned(user_id: str) -> bool:
     conn = get_connection()
     c    = conn.cursor()
@@ -116,6 +129,7 @@ def is_banned(user_id: str) -> bool:
     return found
 
 
+@to_thread
 def ban(user_id: str, reason: str) -> None:
     conn = get_connection()
     conn.execute(
@@ -130,6 +144,7 @@ def ban(user_id: str, reason: str) -> None:
     conn.close()
 
 
+@to_thread
 def unban(user_id: str) -> None:
     conn = get_connection()
     conn.execute("DELETE FROM user_bans WHERE user_id = ?", (user_id,))
@@ -138,6 +153,7 @@ def unban(user_id: str) -> None:
 
 # ── 暫時限制（系統自動偵測異常行為） ──────────────────────
 
+@to_thread
 def get_temp_restriction(user_id: str) -> dict | None:
     """
     回傳暫時限制紀錄（不論是否已過期），呼叫方自行判斷 expires_at。
@@ -156,6 +172,7 @@ def get_temp_restriction(user_id: str) -> dict | None:
     return {"reason": row["reason"], "expires_at": row["expires_at"]}
 
 
+@to_thread
 def set_temp_restriction(user_id: str, reason: str, expires_at: float) -> None:
     conn = get_connection()
     conn.execute(
@@ -173,6 +190,7 @@ def set_temp_restriction(user_id: str, reason: str, expires_at: float) -> None:
     conn.close()
 
 
+@to_thread
 def clear_temp_restriction(user_id: str) -> None:
     conn = get_connection()
     conn.execute("DELETE FROM temp_restrictions WHERE user_id = ?", (user_id,))
@@ -181,6 +199,7 @@ def clear_temp_restriction(user_id: str) -> None:
 
 # ── Interactions ──────────────────────
 
+@to_thread
 def get_interaction_count(user_id: str) -> int:
     conn = get_connection()
     c    = conn.cursor()
@@ -192,6 +211,7 @@ def get_interaction_count(user_id: str) -> int:
     return row["count"] if row else 0
 
 
+@to_thread
 def increment_interaction(user_id: str) -> int:
     conn  = get_connection()
     c     = conn.cursor()
@@ -215,6 +235,7 @@ def increment_interaction(user_id: str) -> int:
 
 # ── Global Memories ──────────────────────
 
+@to_thread
 def list_global_memories() -> list[tuple[str, str, int]]:
     conn = get_connection()
     c    = conn.cursor()
@@ -226,6 +247,7 @@ def list_global_memories() -> list[tuple[str, str, int]]:
     return [(r["keyword"], r["content"], r["importance"]) for r in rows]
 
 
+@to_thread
 def upsert_global_memory(keyword: str, content: str, importance: int) -> None:
     conn = get_connection()
     conn.execute(
@@ -243,6 +265,7 @@ def upsert_global_memory(keyword: str, content: str, importance: int) -> None:
     conn.close()
 
 
+@to_thread
 def delete_global_memory(keyword: str) -> bool:
     conn = get_connection()
     c    = conn.cursor()
@@ -254,6 +277,7 @@ def delete_global_memory(keyword: str) -> bool:
 
 # ── Profile ──────────────────────
 
+@to_thread
 def get_profile(user_id: str) -> dict:
     conn = get_connection()
     c    = conn.cursor()
@@ -268,6 +292,7 @@ def get_profile(user_id: str) -> dict:
         return {}
 
 
+@to_thread
 def save_profile(user_id: str, username: str, data: dict) -> None:
     conn = get_connection()
     conn.execute(
@@ -286,6 +311,7 @@ def save_profile(user_id: str, username: str, data: dict) -> None:
 
 # ── State ──────────────────────
 
+@to_thread
 def get_state_row(user_id: str) -> dict | None:
     """
     回傳原始 state 列，呼叫方負責判斷是否過期。
@@ -311,6 +337,7 @@ def get_state_row(user_id: str) -> dict | None:
     }
 
 
+@to_thread
 def upsert_state(
     user_id:    str,
     state:      str,
@@ -334,6 +361,7 @@ def upsert_state(
     conn.close()
 
 
+@to_thread
 def delete_state(user_id: str) -> None:
     conn = get_connection()
     conn.execute(
@@ -343,6 +371,7 @@ def delete_state(user_id: str) -> None:
     conn.close()
 
 
+@to_thread
 def list_active_states(now: float) -> list[dict]:
     """取得所有非 normal 且未過期的對話狀態。"""
     conn = get_connection()

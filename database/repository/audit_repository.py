@@ -2,7 +2,15 @@
 database/repository/audit_repository.py
 
 Modification():
-- 統一檔案註解格式，保留原有職責說明。
+- insert_log() 與 get_recent() 套用 utils.async_db.to_thread 裝飾器：
+  這兩個函式會在 Bot 正常運作期間被重複呼叫（每次管理指令執行、
+  每次查詢操作紀錄），原本是同步函式卻直接被 async 函式呼叫，等於
+  每次呼叫都會佔用事件迴圈直到 SQLite 查詢完成。套用裝飾器後改為
+  透過 await 呼叫，實際執行委派給背景執行緒池。呼叫端同步更新為
+  await（core/ai/admin_service.py）。
+  init_tables() 不套用：只在模組載入時執行一次，且已經整個被
+  bot.py 的 `await asyncio.to_thread(initialize)` 包住執行，不需要
+  重複包裝。
 
 職責：
 - 管理指令操作紀錄（audit log）的純 SQL 查詢層
@@ -19,6 +27,7 @@ Modification():
 from __future__ import annotations
 
 from database.ai.sqlite import get_connection
+from utils.async_db import to_thread
 
 # ── 初始化 ──────────────────────
 
@@ -42,6 +51,7 @@ def init_tables() -> None:
 
 # ── 寫入 ──────────────────────
 
+@to_thread
 def insert_log(
     actor_id:  str,
     command:   str,
@@ -67,6 +77,7 @@ def insert_log(
 
 # ── 查詢 ──────────────────────
 
+@to_thread
 def get_recent(limit: int = 20) -> list[dict]:
     """取得最近 N 筆操作紀錄，依時間降序。"""
     conn = get_connection()
