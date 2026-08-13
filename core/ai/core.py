@@ -7,6 +7,15 @@ Modification():
 - 多模態圖片會以 Gemini Part 送入模型；若路由選到非 Gemini，會自動切到 MULTIMODAL_MODEL。
 - channel_id 會一路傳給 context_manager 與 save_message，避免跨頻道串台。
 - client、模型名稱與 fallback 皆使用集中模組，避免重複硬編碼。
+- 新增 model_override 選填關鍵字參數，原樣轉呼叫 agent_router.route()：
+  讓 cogs/ai/ai_command.py 的 /ai 指令下拉選單可覆寫規則路由的模型
+  選擇。本檔不解析、不驗證其內容——合法性檢查、MODEL_CHOICES 對照、
+  以及「指定模型不支援搜尋時自動升級」都由 agent_router 負責，這裡
+  只單純轉傳一個可能為 None 的字串。此參數與既有的多模態路由保護
+  （images 存在但模型非 Gemini → 切到 MULTIMODAL_MODEL）及搜尋雙重
+  保險（use_search 但模型非 Gemini → 停用搜尋）完全相容：兩者都是
+  在 decision 產生「之後」才生效的保護層，不論 decision.model 是自動
+  判斷還是手動指定，都會一併套用，不需要另外處理。
 
 職責：
 - 驗證使用者狀態與 prompt 安全性。
@@ -222,6 +231,7 @@ async def generate(
     *,
     files: Sequence[ParsedFile] | None = None,
     image_parts: Sequence[types.Part] | None = None,
+    model_override: str | None = None,
 ) -> str:
     user_id  = str(user.id)
     # getattr(..., None) or getattr(...) 在型別上會被 mypy 推導為
@@ -268,7 +278,7 @@ async def generate(
     images       = list(image_parts or [])
 
     # ── 規則路由（模型 + 工具，無 AI 呼叫） ──────────────────────
-    decision = make_route(clean)
+    decision = make_route(clean, model_override=model_override)
 
     # ── 多模態路由保護 ──────────────────────
     if images and not is_gemini(decision.model):

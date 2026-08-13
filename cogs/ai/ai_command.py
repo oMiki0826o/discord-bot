@@ -16,10 +16,20 @@ Modification():
   的作法，而非隨意的新設計）。
 - allowed_contexts(guilds=True, dms=True, private_channels=True)：
   與 say.py 的既有慣例一致，讓指令同時可在伺服器與各種私訊情境使用。
+- 新增 model 選填參數（Discord Choice：flash／gemini／gemma），讓
+  使用者可透過下拉選單明確指定本次對話要用的模型，不必再依賴 prompt
+  文字內嵌關鍵字（如「用flash」）才能間接觸發覆寫；選項清單直接沿用
+  agent_router.MODEL_CHOICES 的 key，兩處只維護一份對照表，避免
+  日後新增或異動模型時兩邊各自為政、互相脫節。
+- model_override 需要 core.ai.core.generate() 對應支援並轉呼叫
+  agent_router.route(prompt, model_override=...)；本檔僅負責把
+  Discord 端選到的原始字串往下傳，不在此處解析或驗證模型名稱
+  （該職責屬於 agent_router，見 agent_router.py 的說明）。
 
 職責：
-- 接收使用者輸入的 prompt（與最多 3 個附件），呼叫 core.ai.core.generate()
-  取得回覆，依長度決定直接回覆文字或改傳 .txt 附件。
+- 接收使用者輸入的 prompt、選填的手動指定模型、與最多 3 個附件，
+  呼叫 core.ai.core.generate() 取得回覆，依長度決定直接回覆文字或
+  改傳 .txt 附件。
 - Discord 互動有 3 秒內必須回應的限制，AI 生成通常需要數秒到數十秒，
   因此一開始就 defer()，讓 Discord 顯示官方的「思考中」互動狀態，
   真正的回覆改用 followup 送出。
@@ -34,12 +44,28 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from core.ai.agent_router import MODEL_CHOICES
 from core.ai.attachment_utils import process_attachments
 from core.ai.core import generate
 from core.ai.request_guard import check_cooldown, cooldown_message, lock_for
 from core.system.settings import get_int, get_str
 
 logger = logging.getLogger("bot.ai.ai_command")
+
+# ── /ai 指令可選模型（Discord 下拉選單顯示文字） ──────────────────────
+# key 必須與 agent_router.MODEL_CHOICES 完全一致；下方 assert 於
+# 模組載入時檢查，避免兩處清單日後修改時彼此脫節而不自知。
+
+_MODEL_CHOICE_LABELS: dict[str, str] = {
+    "flash":  "Flash（預設・綜合能力較強）",
+    "gemini": "Gemini（支援即時網路搜尋）",
+    "gemma":  "Gemma（輕量・回覆較快）",
+}
+
+assert _MODEL_CHOICE_LABELS.keys() == MODEL_CHOICES.keys(), (
+    "ai_command._MODEL_CHOICE_LABELS 與 agent_router.MODEL_CHOICES 的 "
+    "key 不一致，請同步更新兩者"
+)
 
 
 # ── Cog ──────────────────────
@@ -52,15 +78,21 @@ class AICommand(commands.Cog):
     @app_commands.command(name="ai", description="與 AI 對話（伺服器頻道或私訊皆可使用）")
     @app_commands.describe(
         prompt = "想問 AI 的內容",
+        model  = "手動指定模型（選填，預設自動判斷）",
         file1  = "附件 1（選填，圖片或文件皆可）",
         file2  = "附件 2（選填）",
         file3  = "附件 3（選填）",
     )
+    @app_commands.choices(model=[
+        app_commands.Choice(name=label, value=key)
+        for key, label in _MODEL_CHOICE_LABELS.items()
+    ])
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     async def ai_command(
         self,
         interaction: discord.Interaction,
         prompt:      str,
+        model:       app_commands.Choice[str] | None = None,
         file1:       discord.Attachment | None = None,
         file2:       discord.Attachment | None = None,
         file3:       discord.Attachment | None = None,
@@ -92,11 +124,12 @@ class AICommand(commands.Cog):
 
             try:
                 text = await generate(
-                    user        = interaction.user,
-                    prompt      = prompt,
-                    channel_id  = str(interaction.channel_id),
-                    files       = files,
-                    image_parts = image_parts,
+                    user           = interaction.user,
+                    prompt         = prompt,
+                    channel_id     = str(interaction.channel_id),
+                    files          = files,
+                    image_parts    = image_parts,
+                    model_override = model.value if model is not None else None,
                 )
                 await self._send_response(interaction, text)
 

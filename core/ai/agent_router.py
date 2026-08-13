@@ -12,9 +12,18 @@ Modification():
 - 將工具決策移交 tool_registry，路由器只負責模型與工具清單決策。
 - 改用 core.ai.models 的集中模型常數，移除本檔重複硬編碼模型名稱。
 - 保留純規則路由，不額外呼叫 AI，降低延遲與費用。
+- route() 新增 model_override 參數：供 /ai 指令的下拉選單直接指定
+  MODEL_CHOICES 的某個 key，優先權高於原本 prompt 文字內的關鍵字
+  （「用flash」等）；「手動指定模型但該模型不支援搜尋」的升級判斷
+  抽成 _guard_search_capability()，讓下拉選單覆寫與文字關鍵字覆寫
+  共用同一份保護邏輯，不必各寫一次。
+- 新增 MODEL_CHOICES：flash／gemini／gemma 三個可手動指定的模型鍵值
+  對照表，供 cogs/ai/ai_command.py 的 Discord Choice 選單與本檔的
+  _MODEL_OVERRIDES 共用同一份清單，避免兩份清單分開維護後彼此脫節；
+  _MODEL_OVERRIDES 現由 MODEL_CHOICES 推導產生，不再重複寫死。
 
 職責：
-- 依 prompt 決定模型、搜尋需求與工具清單。
+- 依 prompt（與可選的手動指定模型）決定模型、搜尋需求與工具清單。
 - 提供 execute_tools() 並行執行已選工具。
 """
 
@@ -41,10 +50,24 @@ _WEB_KEYWORDS: tuple[str, ...] = (
     "哪裡", "地址", "在哪",
 )
 
-_MODEL_OVERRIDES: tuple[tuple[str, str], ...] = (
-    ("用flash",  MODELS["flash"]),
-    ("用gemini", MODELS["lite"]),
-    ("用gemma",  MODELS["gemma"]),
+# 手動指定模型時的文字關鍵字前綴（「用flash」「用gemini」…）。抽成
+# 常數是因為 _MODEL_OVERRIDES 由此推導產生；未來若要調整觸發語法
+# （例如改成「model:flash」），只需要改這一處。
+_OVERRIDE_KEYWORD_PREFIX = "用"
+
+# 可手動指定的模型：key 是對外（文字關鍵字／Discord 下拉選單）看到
+# 的名稱，value 是 core.ai.models.MODELS 對應的實際模型字串。
+# cogs/ai/ai_command.py 的 Discord Choice 選單與下方 _MODEL_OVERRIDES
+# 皆由此表推導，全專案僅此一份，不重複硬編碼。
+MODEL_CHOICES: dict[str, str] = {
+    "flash":  MODELS["flash"],
+    "gemini": MODELS["lite"],
+    "gemma":  MODELS["gemma"],
+}
+
+_MODEL_OVERRIDES: tuple[tuple[str, str], ...] = tuple(
+    (f"{_OVERRIDE_KEYWORD_PREFIX}{key}", model)
+    for key, model in MODEL_CHOICES.items()
 )
 
 _PRO_KEYWORDS: tuple[str, ...] = (
@@ -67,20 +90,26 @@ class RouteDecision:
 
 # ── 主要路由 ──────────────────────
 
-def route(prompt: str) -> RouteDecision:
+def route(prompt: str, model_override: str | None = None) -> RouteDecision:
     """
     純規則路由，零 AI API 呼叫。
 
     決策順序：
-    1. 模型選擇（使用者指定 > 搜尋需求 > 內容判斷 > 預設）
+    1. 模型選擇（/ai 指令參數 > prompt 文字關鍵字 > 搜尋需求 >
+       內容判斷 > 預設）
     2. 工具決策（委派 tool_registry，本函式不含工具邏輯）
+
+    Args:
+        prompt:         使用者輸入內容。
+        model_override: MODEL_CHOICES 其中一個 key（來自 /ai 指令的
+                         下拉選單）；None 表示交由自動規則判斷。
     """
-    model, use_search = _select_model(prompt)
+    model, use_search = _select_model(prompt, model_override)
     tools             = select_tools(prompt)
 
     logger.info(
-        "[agent_router] model=%s search=%s tools=%s",
-        model, use_search, tools,
+        "[agent_router] model=%s search=%s tools=%s override=%s",
+        model, use_search, tools, model_override,
     )
     return RouteDecision(model=model, use_search=use_search, tools=tools)
 
@@ -91,34 +120,55 @@ def needs_web_search(prompt: str) -> bool:
 
 # ── 模型選擇 ──────────────────────
 
-def _select_model(prompt: str) -> tuple[str, bool]:
+def _select_model(prompt: str, model_override: str | None) -> tuple[str, bool]:
     """回傳 (model, use_search)。"""
     p          = prompt.lower()
     use_search = needs_web_search(prompt)
 
-    # ── 1. 使用者明確指定 ──────────────────────
+    # ── 1. /ai 指令下拉選單明確指定 ──────────────────────
+    if model_override is not None:
+        model = MODEL_CHOICES.get(model_override)
+        if model is None:
+            logger.warning(
+                "[agent_router] 未知的 model_override=%s，忽略並改用自動判斷",
+                model_override,
+            )
+        else:
+            return _guard_search_capability(model, use_search)
+
+    # ── 2. prompt 文字內的關鍵字指定 ──────────────────────
     for keyword, model in _MODEL_OVERRIDES:
         if keyword in p:
-            if use_search and not is_gemini(model):
-                logger.warning(
-                    "[agent_router] user override %s 不支援搜尋，升級為 %s",
-                    model, GROUNDING_MIN_MODEL,
-                )
-                return GROUNDING_MIN_MODEL, use_search
-            logger.info("[agent_router] user_override=%s", model)
-            return model, use_search
+            logger.info("[agent_router] keyword_override=%s", model)
+            return _guard_search_capability(model, use_search)
 
-    # ── 2. 需要搜尋 → 強制 Gemini ──────────────────────
+    # ── 3. 需要搜尋 → 強制使用支援搜尋的模型 ──────────────────────
     if use_search:
         model = DEFAULT_MODEL if is_gemini(DEFAULT_MODEL) else GROUNDING_MIN_MODEL
         return model, True
 
-    # ── 3. 程式 / 數學 / 分析 → Flash ──────────────────────
+    # ── 4. 程式 / 數學 / 分析 → Flash ──────────────────────
     if any(kw in p for kw in _PRO_KEYWORDS):
         return MODELS["flash"], False
 
-    # ── 4. 預設 ──────────────────────
+    # ── 5. 預設 ──────────────────────
     return DEFAULT_MODEL, False
+
+
+def _guard_search_capability(model: str, use_search: bool) -> tuple[str, bool]:
+    """
+    手動指定模型（不論來自指令參數或文字關鍵字）時的保護檢查：
+    若目前 prompt 需要搜尋，但指定的模型不支援搜尋（非 Gemini 家族），
+    強制升級為 GROUNDING_MIN_MODEL 並記錄警告，避免搜尋請求送到不
+    支援搜尋的模型後靜默失敗或得到過期答案。
+    """
+    if use_search and not is_gemini(model):
+        logger.warning(
+            "[agent_router] 指定模型 %s 不支援搜尋，升級為 %s",
+            model, GROUNDING_MIN_MODEL,
+        )
+        return GROUNDING_MIN_MODEL, use_search
+    return model, use_search
 
 # ── Tool 執行 ──────────────────────
 
