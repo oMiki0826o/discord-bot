@@ -57,9 +57,9 @@ logger = logging.getLogger("bot.ai.ai_command")
 # 模組載入時檢查，避免兩處清單日後修改時彼此脫節而不自知。
 
 _MODEL_CHOICE_LABELS: dict[str, str] = {
-    "flash":  "Flash（預設・綜合能力較強）",
-    "gemini": "Gemini（支援即時網路搜尋）",
-    "gemma":  "Gemma（輕量・回覆較快）",
+    "flash":  "2.5Flash",
+    "gemini": "3.1Flash lite",
+    "gemma":  "Gemma4 31B",
 }
 
 assert _MODEL_CHOICE_LABELS.keys() == MODEL_CHOICES.keys(), (
@@ -75,7 +75,7 @@ class AICommand(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    @app_commands.command(name="ai", description="與 AI 對話（伺服器頻道或私訊皆可使用）")
+    @app_commands.command(name="ai", description="與 AI 對話")
     @app_commands.describe(
         prompt = "想問 AI 的內容",
         model  = "手動指定模型（選填，預設自動判斷）",
