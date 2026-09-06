@@ -1,64 +1,19 @@
+
 """
 cogs/events/link_preview.py
 
-Modification():
+Link preview Cog.
 
-- 修正「影片截取」的核心作法：原本影片網址存在時會呼叫
-  download_if_within_limit() 下載影片位元組、包裝成 Discord 附件
-  重新上傳，這個做法受限於 link_preview.video_max_upload_mb（原預設
-  8MB），影片稍微長一點或畫質高一點就會下載失敗，靜默退回只顯示
-  縮圖；下載＋上傳也消耗 Bot 自己的頻寬。參考真實案例 FixTweetBot
-  （一款成熟的公開 Discord 連結修復 Bot，支援數十種平台）的做法：
-  它完全不下載影片，只是把連結網域替換成修復網域（vxbilibili.com、
-  fxtwitter.com 等），送出這個修復後的網址純文字，讓 Discord 自己
-  的爬蟲原生解析出可播放的影片嵌入。改為 preview.embed_video_link
-  存在時，將這個網址一併作為訊息的純文字內容送出（不加 <> 角括號，
-  Discord 才會對其產生原生嵌入），與我們自己組的 Embed 一起顯示：
-  我們的 Embed 負責標題／統計／說明等文字資訊，Discord 原生嵌入
-  負責實際的影片播放，兩者呈現內容不同，不是重複顯示。沒有檔案
-  大小上限問題，也不需要下載＋上傳。
-- 移除 _maybe_build_video_file()：不再需要下載影片，改由
-  embed_video_link 讓 Discord 原生處理。core.link_preview.video
-  對應的下載邏輯已一併簡化（見該檔案的 Modification 說明）。
-- _build_embed() 的 has_video 判斷依據改為「preview.embed_video_link
-  是否存在」，而非「是否已成功下載影片檔案」，其餘行為不變：
-  有影片時縮圖讓給 Discord 原生嵌入本身、Embed 只留文字資訊。
-- 新增本檔案：取代舊有的 cogs/events/bilibili.py，整合多平台連結
-  預覽與關鍵字摘要
-- 新增 Pinterest、Twitter/X、TikTok 支援，被動預覽清單擴充為
-  六種平台。YouTube 刻意不納入：Discord 對 youtube.com 連結原生
-  就有完整的官方 oEmbed 支援（標題、縮圖、可內嵌播放器），若我們
-  再另外發一則 Embed，會與 Discord 原生預覽重複顯示，對使用者
-  是更差的體驗，因此不處理
-- 新增關鍵字觸發的通用網頁摘要，與被動預覽路徑完全獨立，
-  只要訊息含關鍵字 + 任意網址就會觸發，不限定支援平台
-- Embed 內文加上長度防護（_truncate），避免極長的原始簡介超過
-  Discord embed description 4096 字元上限
-- 行程內有界快取（OrderedDict）：避免同一連結短時間重複貼出時
-  重複發送外部請求，大小由 settings.json link_preview.cache_size
-  控制
-- _build_embed() 新增「查看原始貼文」超連結行：原本只有標題可以
-  點擊（embed.url），內文中沒有任何明確的連結文字，使用者容易
-  忽略標題其實可以點擊。現在固定在內文末端加上一行 Markdown
-  超連結，來源與原始網址一目了然
+Bilibili 特殊流程：
+- 不呼叫 Bilibili API
+- 不建立資訊 Embed
+- 不下載影片
+- 直接產生 vxbilibili.com 修復連結
+- 回覆一則：
+      bilibili（https://www.vxbilibili.com/video/BVxxxxxxxxxx/）
+- 回覆成功後抑制原使用者訊息的 Discord Embed
 
-職責：
-
-- 監聽伺服器訊息，涵蓋兩種獨立功能：
-  1. 被動預覽：偵測 Discord 原生 Embed 支援不佳的連結（Bilibili、
-     Instagram、Threads、Pinterest、Twitter/X、TikTok），自動
-     擷取資訊並組成 Embed 回覆；偵測到影片時額外送出修復連結，
-     讓 Discord 原生嵌入播放
-  2. 關鍵字摘要：訊息出現「摘要」等關鍵字並緊接任意網址時，爬取
-     該網址的網頁純文字，透過 Gemma 生成摘要後回覆
-
-設計原則：
-
-- 平台判斷、擷取邏輯、摘要邏輯皆下放到 core/link_preview，本檔案
-  只負責「訊息事件 → 呼叫核心邏輯 → 組裝 Embed → 回覆」
-- 新增平台時只需在 core/link_preview/registry.py 與 detector.py
-  各新增一筆，本 Cog 不需修改
-- 所有數量上限、關鍵字、逾時秒數等皆讀取 settings.json
+其他平台維持原本的 LinkPreview 流程。
 """
 
 from __future__ import annotations
@@ -79,54 +34,86 @@ from core.link_preview.summary_trigger import find_summary_request
 from core.system.settings import get_int, get_str
 from utils.discord_errors import friendly_http_error
 
+
 logger = logging.getLogger("bot.events.link_preview")
 
 
-# ── 連結預覽 Cog ──────────────────────
+# ─────────────────────────────────────────────
+# Link Preview Cog
+# ─────────────────────────────────────────────
+
 
 class LinkPreviewCog(commands.Cog):
     """
-    處理兩類獨立功能：
-    - 被動預覽：Bilibili / Instagram / Threads / Pinterest / Twitter / TikTok
-    - 關鍵字摘要：「摘要」+ 任意網址
+    處理兩類功能：
+
+    1. 被動預覽
+       Bilibili / Instagram / Threads / Pinterest / Twitter / TikTok
+
+    2. 關鍵字摘要
+       「摘要」+ 任意網址
+
+    Bilibili 使用特殊的極簡修復流程：
+        bilibili（vxbilibili URL）
     """
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        # url -> LinkPreview：行程內有界 LRU 快取，避免短時間內
-        # 相同連結重複觸發外部請求。Bot 重啟後清空，屬可接受行為。
+
+        # url -> LinkPreview
+        #
+        # 其他平台仍使用快取。
+        # Bilibili 也會沿用此機制，但不會進行 Bilibili API 請求。
         self._cache: OrderedDict[str, LinkPreview] = OrderedDict()
 
-    # ── 訊息事件入口 ──────────────────────
+    # ─────────────────────────────────────────
+    # Message event
+    # ─────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        """只處理伺服器訊息；私訊由 cogs/events/message.py 處理。"""
+        """只處理伺服器訊息；Bot 訊息與私訊略過。"""
+
         if message.author.bot or message.guild is None:
             return
+
         if not get_flag("link_preview.enabled", True):
             return
 
         try:
             await self._handle_summary_request(message)
             await self._handle_passive_previews(message)
+
         except Exception:
             logger.exception(
-                "[連結預覽] on_message 發生未預期例外 author=%s", message.author
+                "[連結預覽] on_message 發生未預期例外 author=%s",
+                message.author,
             )
 
-    # ── 關鍵字摘要 ──────────────────────
+    # ─────────────────────────────────────────
+    # Summary
+    # ─────────────────────────────────────────
 
-    async def _handle_summary_request(self, message: discord.Message) -> None:
+    async def _handle_summary_request(
+        self,
+        message: discord.Message,
+    ) -> None:
         """
-        「摘要」+ 網址觸發的通用摘要功能，不限定平台。
+        「摘要」+ 網址的通用摘要功能。
 
-        與被動預覽完全獨立：即使網址是 Bilibili 等已支援平台，
-        關鍵字觸發後仍會爬取網頁純文字另行摘要（來源不同）。
-        關鍵字可由 link_preview.summary_keyword 設定（預設「摘要」）。
+        與被動預覽完全獨立。
         """
-        keyword = get_str("link_preview.summary_keyword", "摘要")
-        url     = find_summary_request(message.content, keyword=keyword)
+
+        keyword = get_str(
+            "link_preview.summary_keyword",
+            "摘要",
+        )
+
+        url = find_summary_request(
+            message.content,
+            keyword=keyword,
+        )
+
         if url is None:
             return
 
@@ -134,90 +121,254 @@ class LinkPreviewCog(commands.Cog):
             "link_preview.summary_fail_message",
             "無法擷取這個網址的內容，可能是網站封鎖爬取或內容非純文字頁面。",
         )
-        fetch_max_chars = get_int("link_preview.summary_fetch_max_chars", 6000)
 
-        text = await fetch_text(url, max_chars=fetch_max_chars)
+        fetch_max_chars = get_int(
+            "link_preview.summary_fetch_max_chars",
+            6000,
+        )
+
+        text = await fetch_text(
+            url,
+            max_chars=fetch_max_chars,
+        )
+
         if not text:
-            await self._safe_reply(message, fail_message)
+            await self._safe_reply(
+                message,
+                fail_message,
+            )
             return
 
         result = await summarize(text)
+
         if not result:
-            await self._safe_reply(message, fail_message)
+            await self._safe_reply(
+                message,
+                fail_message,
+            )
             return
 
-        await self._safe_reply(message, f"**摘要**\n{result}")
+        await self._safe_reply(
+            message,
+            f"**摘要**\n{result}",
+        )
 
-    # ── 被動預覽 ──────────────────────
+    # ─────────────────────────────────────────
+    # Passive previews
+    # ─────────────────────────────────────────
 
-    async def _handle_passive_previews(self, message: discord.Message) -> None:
-        """支援平台連結的自動預覽（見 core.link_preview.detector）。"""
+    async def _handle_passive_previews(
+        self,
+        message: discord.Message,
+    ) -> None:
+        """處理訊息中的支援平台連結。"""
+
         links = detect_links(message.content)
+
         if not links:
             return
 
-        max_links = max(1, get_int("link_preview.max_embeds_per_message", 3))
+        max_links = max(
+            1,
+            get_int(
+                "link_preview.max_embeds_per_message",
+                3,
+            ),
+        )
+
         for platform, url in links[:max_links]:
-            await self._handle_link(message, platform, url)
+            await self._handle_link(
+                message,
+                platform,
+                url,
+            )
 
     async def _handle_link(
         self,
-        message:  discord.Message,
+        message: discord.Message,
         platform: str,
-        url:      str,
+        url: str,
     ) -> None:
-        """處理單一連結：擷取、（選用）摘要、組裝 Embed、回覆。"""
-        preview = await self._get_preview(platform, url)
+        """
+        處理單一連結。
+
+        Bilibili：
+            使用極簡修復流程。
+
+        其他平台：
+            使用原本的 LinkPreview 流程。
+        """
+
+        # ─────────────────────────────────────
+        # Bilibili special flow
+        # ─────────────────────────────────────
+
+        if platform.lower() == "bilibili":
+            await self._handle_bilibili(
+                message,
+                url,
+            )
+            return
+
+        # ─────────────────────────────────────
+        # Other platforms
+        # ─────────────────────────────────────
+
+        preview = await self._get_preview(
+            platform,
+            url,
+        )
+
         if preview is None:
-            logger.info("[連結預覽] 擷取失敗，略過 platform=%s url=%s", platform, url)
+            logger.info(
+                "[連結預覽] 擷取失敗，略過 platform=%s url=%s",
+                platform,
+                url,
+            )
             return
 
         await self._maybe_summarize(preview)
 
-        # 有 embed_video_link 且設定允許時，才會額外送出修復連結
-        # 讓 Discord 原生嵌入播放（見 _build_embed 的 has_video
-        # 參數說明：此時 Embed 本身不再放縮圖，避免與 Discord 原生
-        # 嵌入的影片預覽畫面重複）。
-        has_video = bool(preview.embed_video_link) and get_flag("link_preview.attach_video", True)
-        embed = self._build_embed(preview, has_video=has_video)
+        has_video = (
+            bool(preview.embed_video_link)
+            and get_flag(
+                "link_preview.attach_video",
+                True,
+            )
+        )
+
+        embed = self._build_embed(
+            preview,
+            has_video=has_video,
+        )
 
         try:
             if has_video:
-                # 純文字內容不能用 <> 角括號包住修復連結，否則 Discord
-                # 會抑制該連結的嵌入，導致完全沒有影片畫面。
                 await message.reply(
                     content=preview.embed_video_link,
                     embed=embed,
                     mention_author=False,
                 )
             else:
-                await message.reply(embed=embed, mention_author=False)
+                await message.reply(
+                    embed=embed,
+                    mention_author=False,
+                )
+
         except discord.HTTPException as exc:
             logger.error(
-                "[連結預覽] 回覆失敗 url=%s reason=%s", url, friendly_http_error(exc)
+                "[連結預覽] 回覆失敗 url=%s reason=%s",
+                url,
+                friendly_http_error(exc),
             )
             return
 
         await self._try_suppress_original_embed(message)
 
-    # ── 擷取（含快取） ──────────────────────
+    # ─────────────────────────────────────────
+    # Bilibili
+    # ─────────────────────────────────────────
 
-    async def _get_preview(self, platform: str, url: str) -> LinkPreview | None:
-        """先查快取，沒有才呼叫對應擷取器並寫入快取。"""
+    async def _handle_bilibili(
+        self,
+        message: discord.Message,
+        url: str,
+    ) -> None:
+        """
+        Bilibili 專用流程。
+
+        最終只發送：
+
+            [Bilibili](https://www.vxbilibili.com/video/BVxxxxxxxxxx/)
+
+        不建立 Embed。
+
+        不呼叫 Bilibili API。
+
+        b23.tv 只會由 extractor 進行 HTTP redirect，
+        用來取得 BVID。
+
+        回覆成功後，抑制原訊息的 Discord Embed。
+        """
+
+        preview = await self._get_preview(
+            "bilibili",
+            url,
+        )
+
+        if preview is None:
+            logger.info(
+                "[Bilibili] 無法解析連結，略過 url=%s",
+                url,
+            )
+            return
+
+        fixed_link = preview.embed_video_link
+
+        if not fixed_link:
+            logger.info(
+                "[Bilibili] 沒有可用修復連結 url=%s",
+                url,
+            )
+            return
+
+        content = f"[Bilibili]({fixed_link})"
+
+        try:
+            await message.reply(
+                content=content,
+                mention_author=False,
+            )
+
+        except discord.HTTPException as exc:
+            logger.error(
+                "[Bilibili] 回覆失敗 url=%s reason=%s",
+                url,
+                friendly_http_error(exc),
+            )
+            return
+
+        # 回覆成功後，抑制原使用者訊息的 Discord Embed。
+        #
+        # 注意：
+        # 這不會刪除使用者的原始訊息，
+        # 只會移除 / 隱藏該訊息在 Discord 中的 Embed 預覽。
+        await self._try_suppress_original_embed(message)
+
+    # ─────────────────────────────────────────
+    # Preview cache
+    # ─────────────────────────────────────────
+
+    async def _get_preview(
+        self,
+        platform: str,
+        url: str,
+    ) -> LinkPreview | None:
+        """查快取，沒有才呼叫對應擷取器。"""
+
         cached = self._cache.get(url)
+
         if cached is not None:
             self._cache.move_to_end(url)
             return cached
 
         extractor = get_extractor(platform)
+
         if extractor is None:
+            logger.warning(
+                "[連結預覽] 找不到擷取器 platform=%s",
+                platform,
+            )
             return None
 
         try:
             preview = await extractor(url)
+
         except Exception:
             logger.exception(
-                "[連結預覽] 擷取器發生例外 platform=%s url=%s", platform, url
+                "[連結預覽] 擷取器發生例外 platform=%s url=%s",
+                platform,
+                url,
             )
             return None
 
@@ -227,110 +378,233 @@ class LinkPreviewCog(commands.Cog):
         self._cache[url] = preview
         self._cache.move_to_end(url)
 
-        limit = max(1, get_int("link_preview.cache_size", 200))
+        limit = max(
+            1,
+            get_int(
+                "link_preview.cache_size",
+                200,
+            ),
+        )
+
         while len(self._cache) > limit:
             self._cache.popitem(last=False)
 
         return preview
 
-    # ── 被動預覽的自動摘要 ──────────────────────
+    # ─────────────────────────────────────────
+    # Automatic summary
+    # ─────────────────────────────────────────
 
-    async def _maybe_summarize(self, preview: LinkPreview) -> None:
-        """簡介內容夠長時才呼叫 Gemma 生成摘要，避免短文字耗用 API 額度。"""
+    async def _maybe_summarize(
+        self,
+        preview: LinkPreview,
+    ) -> None:
+        """其他平台的簡介夠長時才產生 AI 摘要。"""
+
         if not preview.description:
             return
-        min_chars = get_int("link_preview.summary_trigger_min_chars", 60)
+
+        min_chars = get_int(
+            "link_preview.summary_trigger_min_chars",
+            60,
+        )
+
         if len(preview.description) < min_chars:
             return
-        preview.summary = await summarize(preview.description)
 
-    # ── Embed 組裝 ──────────────────────
+        preview.summary = await summarize(
+            preview.description,
+        )
 
-    def _build_embed(self, preview: LinkPreview, *, has_video: bool = False) -> discord.Embed:
-        """
-        組裝 Embed：作者列（平台）、來源、統計、標題、說明、縮圖、原始連結。
+    # ─────────────────────────────────────────
+    # Embed builder
+    # ─────────────────────────────────────────
 
-        has_video 為 True 時（訊息會額外送出修復連結，讓 Discord
-        原生嵌入播放影片），Embed 刻意不再呼叫 set_image() 塞入縮圖：
-        Discord 原生嵌入本身就會顯示影片的預覽畫面與播放按鈕，我們
-        的 Embed 若同時也放一張幾乎相同的縮圖，會讓同一則訊息出現
-        兩張看起來很像的圖，縮圖讓給 Discord 原生嵌入、我們的 Embed
-        只負責文字資訊，沒有影片時才維持原本「縮圖 + 連結」的呈現。
-        """
-        max_desc_chars = get_int("link_preview.embed_description_max_chars", 800)
+    def _build_embed(
+        self,
+        preview: LinkPreview,
+        *,
+        has_video: bool = False,
+    ) -> discord.Embed:
+        """建立其他平台使用的資訊 Embed。"""
 
-        lines: list[str] = [preview.source_label, ""]
+        max_desc_chars = get_int(
+            "link_preview.embed_description_max_chars",
+            800,
+        )
+
+        lines: list[str] = [
+            preview.source_label,
+            "",
+        ]
 
         if preview.stats:
-            lines.append("　".join(
-                f"{stat.icon} {stat.value}" for stat in preview.stats
-            ))
+            lines.append(
+                "　".join(
+                    f"{stat.icon} {stat.value}"
+                    for stat in preview.stats
+                )
+            )
             lines.append("")
 
         if preview.author:
-            lines.append(f"**{preview.author}**")
+            lines.append(
+                f"**{preview.author}**"
+            )
 
         if preview.title:
-            lines.append(f"**{preview.title}**")
+            lines.append(
+                f"**{preview.title}**"
+            )
 
-        body = self._truncate(preview.summary or preview.description, max_desc_chars)
+        body = self._truncate(
+            preview.summary or preview.description,
+            max_desc_chars,
+        )
+
         if body:
             lines.append("")
             lines.append(body)
 
-        # ── 原始連結：內文中固定顯示一行明確的超連結 ──────────────────────
-        # embed.url（標題可點擊）之外，額外提供內文連結，避免使用者
-        # 忽略標題其實可以點擊；[顯示文字](網址) 是 Discord 支援的
-        # Markdown 超連結語法，會被渲染成可點擊的連結。
         lines.append("")
-        lines.append(f"[查看原始貼文]({preview.url})")
+        lines.append(
+            f"[查看原始貼文]({preview.url})"
+        )
 
         embed = discord.Embed(
-            description = "\n".join(lines),
-            url         = preview.url,
-            color       = preview.color,
+            description="\n".join(lines),
+            url=preview.url,
+            color=preview.color,
         )
-        embed.set_author(name=preview.platform_label)
+
+        embed.set_author(
+            name=preview.platform_label,
+        )
+
         if preview.thumbnail_url and not has_video:
-            embed.set_image(url=preview.thumbnail_url)
-        embed.set_footer(text=preview.platform_label)
+            embed.set_image(
+                url=preview.thumbnail_url,
+            )
+
+        embed.set_footer(
+            text=preview.platform_label,
+        )
+
         return embed
 
+    # ─────────────────────────────────────────
+    # Text helper
+    # ─────────────────────────────────────────
+
     @staticmethod
-    def _truncate(text: str | None, limit: int) -> str | None:
-        """文字超過 limit 時截斷並附加省略符號，保護 Embed 長度上限。"""
+    def _truncate(
+        text: str | None,
+        limit: int,
+    ) -> str | None:
+        """限制 Embed 文字長度。"""
+
         if text is None or len(text) <= limit:
             return text
-        return text[: max(0, limit - 1)].rstrip() + "..."
 
-    # ── 抑制原生 Embed ──────────────────────
+        return (
+            text[: max(0, limit - 1)].rstrip()
+            + "..."
+        )
 
-    async def _try_suppress_original_embed(self, message: discord.Message) -> None:
+    # ─────────────────────────────────────────
+    # Suppress original embeds
+    # ─────────────────────────────────────────
+
+    async def _try_suppress_original_embed(
+        self,
+        message: discord.Message,
+    ) -> None:
         """
-        若 Bot 具備「管理訊息」權限，抑制原訊息可能產生的低品質原生
-        Embed，避免畫面同時出現兩份預覽。權限不足時安靜略過。
+        抑制原使用者訊息的 Discord Embed。
+
+        這不是刪除訊息。
+
+        效果：
+
+            使用者原訊息：
+            https://www.bilibili.com/video/...
+            ↓
+            Embed 被隱藏
+
+            Bot：
+            bilibili（https://www.vxbilibili.com/video/...）
+
+        Bot 必須具備：
+            Manage Messages
         """
-        permissions = message.channel.permissions_for(message.guild.me)
-        if not permissions.manage_messages:
+
+        if message.guild is None:
             return
+
+        me = message.guild.me
+
+        if me is None:
+            return
+
+        permissions = message.channel.permissions_for(me)
+
+        if not permissions.manage_messages:
+            logger.debug(
+                "[連結預覽] 沒有 Manage Messages 權限，"
+                "無法抑制原始 Embed channel=%s message=%s",
+                message.channel.id,
+                message.id,
+            )
+            return
+
         try:
-            await message.edit(suppress=True)
+            await message.edit(
+                suppress=True,
+            )
+
+        except discord.Forbidden:
+            logger.warning(
+                "[連結預覽] 權限不足，無法抑制原始 Embed message=%s",
+                message.id,
+            )
+
         except discord.HTTPException:
-            pass
+            logger.exception(
+                "[連結預覽] 抑制原始 Embed 失敗 message=%s",
+                message.id,
+            )
 
-    # ── 共用回覆工具 ──────────────────────
+    # ─────────────────────────────────────────
+    # Safe reply
+    # ─────────────────────────────────────────
 
-    async def _safe_reply(self, message: discord.Message, content: str) -> None:
-        """統一的回覆包裝，失敗時記錄詳細原因而不中斷整體流程。"""
+    async def _safe_reply(
+        self,
+        message: discord.Message,
+        content: str,
+    ) -> None:
+        """安全回覆訊息。"""
+
         try:
-            await message.reply(content, mention_author=False)
+            await message.reply(
+                content,
+                mention_author=False,
+            )
+
         except discord.HTTPException as exc:
             logger.error(
-                "[連結預覽] 回覆訊息失敗 reason=%s", friendly_http_error(exc)
+                "[連結預覽] 回覆訊息失敗 reason=%s",
+                friendly_http_error(exc),
             )
 
 
-# ── Extension 入口 ──────────────────────
+# ─────────────────────────────────────────────
+# Extension entry
+# ─────────────────────────────────────────────
+
 
 async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(LinkPreviewCog(bot))
+    await bot.add_cog(
+        LinkPreviewCog(bot)
+    )
+
