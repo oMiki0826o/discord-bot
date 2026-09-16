@@ -1,871 +1,566 @@
-# 流螢醬 Discord Bot — 開發與維運文件
+# 流螢醬 Discord Bot 開發與維運文件
 
-> 這是給開發者／維運者看的技術文件（指令清單、設定檔對照表、專案結構、
-> 已知問題排除、Changelog）。面向一般使用者與 GitHub 首頁的簡短介紹，
-> 請見專案根目錄的 [README.md](../README.md)。
-
-基於 discord.py 2.x 的多功能 Discord Bot，整合 AI 對話（Google Gemini）、音樂播放、伺服器管理、工單系統、臨時語音頻道、連結預覽等功能。
-
----
+本文件以目前程式碼為準，提供開發、部署、權限管理與故障排除所需的技術資訊。專案簡介與快速安裝請見 [README](../README.md)。
 
 ## 目錄
 
-- [環境需求](#環境需求)
-- [快速啟動](#快速啟動)
-- [設定檔說明](#設定檔說明)
+- [技術概覽](#技術概覽)
+- [開發環境](#開發環境)
+- [Discord 設定與 Bot 權限](#discord-設定與-bot-權限)
+- [啟動流程](#啟動流程)
 - [專案結構](#專案結構)
-- [連結預覽（Bilibili／Instagram／Threads／Pinterest／Twitter(X)／TikTok／關鍵字摘要）](#連結預覽bilibili-instagram-threads-pinterest-twitterx-tiktok-關鍵字摘要)
-- [Slash 指令一覽](#slash-指令一覽)
-- [Prefix 指令一覽（$）](#prefix-指令一覽)
-- [權限對照表](#權限對照表)
-- [已知問題與排除](#已知問題與排除)
-- [Changelog](#changelog)
+- [指令與權限](#指令與權限)
+- [設定系統](#設定系統)
+- [核心子系統](#核心子系統)
+- [資料庫](#資料庫)
+- [開發 Cog](#開發-cog)
+- [測試與檢查](#測試與檢查)
+- [維運與故障排除](#維運與故障排除)
+- [安全原則](#安全原則)
 
----
+## 技術概覽
 
-## 環境需求
+| 項目 | 實作 |
+|---|---|
+| Discord 框架 | discord.py 2.7.1，Slash Command 與 Prefix Command 並存 |
+| Python | 3.11 以上 |
+| AI | `google-genai`，Gemini/Gemma 路由、記憶、內容審核與用量管理 |
+| 音樂 | yt-dlp、FFmpeg、PyNaCl |
+| HTTP | httpx 與 aiohttp |
+| 文件解析 | MarkItDown 與專案自有 file parser registry |
+| 資料庫 | SQLite，Repository Pattern |
+| 設定 | `.env` 儲存機密；`settings.json` 儲存可熱更新行為參數 |
+| 測試 | pytest |
 
-- Python 3.11 以上
-- FFmpeg（音樂播放）
-- SQLite（內建）
+主要分層：
 
+```text
+Discord event / command
+        ↓
+      cogs/
+        ↓
+      core/          業務邏輯
+        ↓
+database/repository/ 資料存取
+        ↓
+      SQLite
 ```
-pip install -r requirements.txt
+
+Cog 應處理 Discord 互動、參數驗證與回覆；可重用的邏輯應放在 `core/`；SQL 應放在 `database/repository/`。
+
+## 開發環境
+
+### 必要軟體
+
+- Python 3.11+
+- FFmpeg
+- Git
+- Discord Bot Token
+- Google Gemini API Key（開發 AI 功能時）
+
+`pymediainfo` 如要讀取完整媒體資訊，主機上還需 MediaInfo 共用程式庫。
+
+### 建立虛擬環境
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install pytest
+cp .env.example .env
 ```
 
-> 連結預覽功能依賴 `httpx`（非同步 HTTP 請求）、`google-genai`（Gemma 摘要生成，與既有 AI 對話功能共用同一套 SDK，不需額外申請金鑰）。純文字擷取（Pinterest／關鍵字摘要）採輕量正規表示式解析，不需要額外安裝 BeautifulSoup 或 lxml。
->
-> 文件解析（`/markdown` 指令與 AI 對話中的文件附件）改用 [markitdown](https://pypi.org/project/markitdown/)（`requirements.txt` 內為 `markitdown[pdf,docx,pptx,xlsx,xls]`），統一處理 pdf／docx／xlsx／xls／pptx，不再各自安裝 pypdf／python-docx／openpyxl／python-pptx。
-
----
-
-## 快速啟動
-
-1. 複製 `.env.example` 為 `.env` 並填入 Token：
+### `.env`
 
 ```env
-DISCORD_TOKEN=你的_Discord_Bot_Token
-GEMINI_API=你的_Google_Gemini_API_Key
-OWNER_ID=你的_Discord_使用者_ID
+DISCORD_TOKEN=Discord_Bot_Token
+GEMINI_API=Google_Gemini_API_Key
+OWNER_ID=Discord_User_ID
 DB_PATH=database/ai/memory.db
+
+# 進階選項
+# EXTENSION_PACKAGES=cogs
+# EXTENSION_BLACKLIST=
+# EXCLUDED_DIRS=__pycache__,venv,.venv
 ```
 
-> 環境變數名稱務必是 `DISCORD_TOKEN`（對應 `config.py` 的
-> `_require("DISCORD_TOKEN")`），不是 `TOKEN`——先前這裡曾誤寫成
-> `TOKEN`，會導致 Bot 啟動時直接丟出「必要環境變數未設定：
-> DISCORD_TOKEN」而無法啟動，已修正。
+`DISCORD_TOKEN` 是唯一會在啟動階段強制要求的變數。`OWNER_ID` 未設定時，Owner 指令與私訊轉發無法按預期使用。`GEMINI_API` 未設定時，非 AI 功能仍可運作。
 
-2. 啟動：
+## Discord 設定與 Bot 權限
+
+### Gateway Intents
+
+`FireflyBot` 會啟用：
+
+- Guilds
+- Guild Members
+- Message Content
+- Voice States
+
+因此 Discord Developer Portal 的 Bot 頁面必須啟用 `Server Members Intent` 與 `Message Content Intent`。
+
+### OAuth2 scopes
+
+- `bot`
+- `applications.commands`
+
+### 建議 Bot 權限
+
+| 功能 | Bot 所需權限 |
+|---|---|
+| 基本回覆 | View Channels、Send Messages、Embed Links、Attach Files、Read Message History |
+| 連結預覽 | Send Messages、Embed Links；Manage Messages 可用於壓制原生預覽 |
+| 音樂 | Connect、Speak |
+| 管理 | Manage Messages、Moderate Members、Kick Members、Ban Members |
+| 工單 | Manage Channels |
+| 臨時語音 | Manage Channels、Move Members |
+| 身份組面板 | Manage Roles，且 Bot 身份組必須高於可領取的身份組 |
+| Webhook 代發 | Manage Webhooks |
+
+不建議為了方便而直接授予 `Administrator`。
+
+## 啟動流程
 
 ```bash
 python bot.py
 ```
 
----
+`FireflyBot.setup_hook()` 依序執行：
 
-## 設定檔說明
+1. 在背景執行緒呼叫 `startup.initialize()`。
+2. 執行核心預熱與資料庫初始化。
+3. 掛載 Discord 錯誤通報 handler。
+4. `ExtensionLoader` 掃描 `EXTENSION_PACKAGES` 中的 Python 檔案。
+5. 載入所有未被排除的 Cog。
+6. 將全域 Slash Commands 同步至 Discord。
+7. 設定 `ready_event`，讓背景任務繼續。
 
-所有可調整的行為參數均存於 `settings.json`，重要欄位如下：
+`on_ready()` 會套用 `settings.json` 的狀態。`close()` 會嘗試傳送 Owner 關機報告，然後關閉 Discord 連線。
 
-| 路徑 | 說明 | 預設值 |
-|------|------|--------|
-| `bot.command_prefix` | Prefix 指令前綴 | `$` |
-| `bot.status_type` | 狀態類型（playing/listening/watching/competing） | `listening` |
-| `bot.status_text` | 狀態顯示文字 | `/play \| @我` |
-| `music.max_queue_size` | 播放佇列上限 | `200` |
-| `music.idle_timeout_seconds` | 閒置自動斷線秒數 | `180` |
-| `music.favorites_per_page` | 收藏清單每頁顯示數 | `10` |
-| `music.favorites_load_all_limit` | 一次載入全部收藏的上限 | `50` |
-| `moderation.dm_target_on_warn` | 警告時是否私訊被警告者 | `true` |
-| `voice_channel.jtc_channel_id` | 「加入即建立」的觸發語音頻道 ID（由 `/vc setup` 寫入） | `0`（未設定） |
-| `voice_channel.category_id` | 臨時語音頻道建立所在的分類 ID | `0`（未設定，建立於觸發頻道同一分類） |
-| `dm.forward_map_limit` | 私訊橋接記憶筆數上限 | `200` |
-| `dm.recent_senders_limit` | /reply 最近私訊者追蹤筆數 | `200` |
-| `link_preview.enabled` | 是否啟用連結預覽功能（含被動預覽與關鍵字摘要） | `true` |
-| `link_preview.max_embeds_per_message` | 單一訊息最多處理幾個被動預覽連結 | `3` |
-| `link_preview.cache_size` | 連結預覽結果快取筆數上限 | `200` |
-| `link_preview.request_timeout_seconds` | 對外請求逾時秒數 | `10` |
-| `link_preview.dead_host_cooldown_seconds` | 候選代理網域失敗後，短期內優先跳過的冷卻秒數（加速略過已知暫時不通的網域，全部候選都在冷卻中時仍會照樣全部嘗試一輪，不會整個停擺） | `300` |
-| `link_preview.embed_description_max_chars` | Embed 內文最大字數（超過會截斷並加上刪節號） | `800` |
-| `link_preview.summary_trigger_min_chars` | 被動預覽的簡介文字達到幾字才觸發 Gemma 自動摘要 | `60` |
-| `link_preview.summary_max_chars` | 摘要輸出字數上限 | `200` |
-| `link_preview.summary_input_max_chars` | 送入 Gemma 摘要前，原文截斷長度上限 | `4000` |
-| `link_preview.attach_video` | 偵測到影片時，是否額外送出修復連結純文字，讓 Discord 原生嵌入播放（不下載影片檔案，見〈連結預覽〉一節說明） | `true` |
-| `link_preview.bilibili_fetch_video` | 是否為 Bilibili 額外產生 vxbilibili.com 風格的修復連結供內嵌播放 | `true` |
-| `link_preview.instagram_proxy_hosts` | Instagram 代理服務候選網域清單，依序嘗試（全部失敗後會再退回原始 instagram.com 網址本身） | `["ddinstagram.com", "instagramez.com", "kkinstagram.com", "d.ddinstagram.com"]` |
-| `link_preview.threads_proxy_hosts` | Threads 代理服務候選網域清單，依序嘗試（全部失敗後會再退回原始網址本身） | `["vxthreads.net", "viewthreads.com"]` |
-| `link_preview.twitter_proxy_hosts` | Twitter/X 代理服務候選網域清單，依序嘗試（全部失敗後會再退回原始網址本身） | `["fxtwitter.com", "vxtwitter.com"]` |
-| `link_preview.tiktok_proxy_hosts` | TikTok 代理服務候選網域清單，依序嘗試（全部失敗後會再退回原始網址本身） | `["tnktok.com", "vxtiktok.com"]` |
-| `link_preview.summary_keyword` | 觸發通用網頁摘要的關鍵字 | `摘要` |
-| `link_preview.summary_fetch_max_chars` | 關鍵字摘要功能抓取網頁純文字的長度上限 | `6000` |
-| `link_preview.article_fetch_max_bytes` | 關鍵字摘要功能抓取網頁時，回應內容的位元組數上限（超過只使用已讀取的部分，避免惡意網站回傳超大內容） | `3000000`（約 3MB） |
-| `link_preview.summary_fail_message` | 網頁爬取失敗時的回覆訊息 | `無法擷取這個網址的內容，可能是網站封鎖爬取或內容非純文字頁面。` |
-
-執行 `$settings reload` 即可熱更新，無需重啟 Bot。
-
----
+macOS 可使用 `./start.command`；該腳本會切換到專案目錄，若 `.venv` 存在則自動啟用。
 
 ## 專案結構
 
-```
-discord-bot-main/
-├── bot.py                    # Bot 主體入口，含全域錯誤處理器
-├── config.py                 # 環境變數讀取
-├── settings.json             # 可熱更新的行為設定
-├── startup.py                # 同步初始化（DB 建表）
-├── README.md                 # 面向一般使用者的專案介紹（GitHub 首頁）
-├── LICENSE                   # PolyForm Noncommercial License 1.0.0
-│
-├── docs/
-│   └── DEVELOPMENT.md        # 本檔案：開發／維運技術文件
-│
-├── cogs/                     # Discord Extension（Cog）
-│   ├── ai/
-│   │   ├── ai_command.py          # /ai slash 指令（伺服器與私訊皆可用）
-│   │   ├── ai_owner_commands.py   # AI 系統管理（Owner）
-│   │   ├── chat.py                # @mention AI 聊天入口
-│   │   ├── dashboard.py           # AI 管理面板
-│   │   └── info.py                # AI 使用說明
-│   ├── events/
-│   │   ├── message.py             # 私訊轉發 & Owner 回覆橋接
-│   │   ├── link_preview.py        # 連結預覽（Bilibili／Instagram／Threads）
-│   │   └── status.py              # Bot 狀態管理
-│   ├── guild/
-│   │   └── guild_settings.py      # 伺服器設定指令群組
-│   ├── minecraft/
-│   │   └── mc_commands.py         # Minecraft 工具（珍珠炮計算機）
-│   ├── moderation/
-│   │   └── mod.py                 # 伺服器管理指令
-│   ├── music/
-│   │   └── music.py               # 音樂播放指令
-│   ├── roles/
-│   │   └── role_management.py     # 身份組面板管理
-│   ├── system/
-│   │   ├── load.py                # Extension 載入管理
-│   │   ├── monitor.py             # 系統監控背景任務
-│   │   ├── owner.py                # Owner 系統指令
-│   │   └── settings_cmd.py        # settings.json 管理
-│   ├── talk/
-│   │   ├── embed.py               # Embed 建構器
-│   │   ├── say.py                 # Bot 代發訊息
-│   │   ├── typing_indicator.py    # 輸入中指示器
-│   │   └── webhook.py             # Webhook 發話
-│   ├── ticket/
-│   │   └── ticket.py              # 工單系統
-│   ├── utility/
-│   │   ├── favorites.py           # 音樂收藏清單
-│   │   ├── general.py             # 一般工具指令
-│   │   └── markdown_convert.py    # /markdown 指令（文件轉 .md）
-│   └── voice/
-│       └── voice_channel.py       # 臨時語音頻道（JTC）
-│
-├── core/                     # 業務邏輯核心（不含 Discord 直接依賴）
-│   ├── ai/                        # AI 推論、上下文、記憶、限速
-│   │   ├── attachment_utils.py     # 附件解析共用邏輯（/ai 與 @mention 共用）
-│   │   ├── request_guard.py        # 每位使用者的並發鎖與冷卻（/ai 與 @mention 共用）
-│   │   ├── file_parser/            # 檔案內容解析（pdf/docx/xlsx/pptx 使用 markitdown）
-│   │   └── models.py               # Gemini / Gemma 模型名稱常數（唯一來源）
-│   ├── link_preview/               # 連結預覽核心邏輯（不含 Discord 直接依賴）
-│   │   ├── base.py                    # LinkPreview / LinkStat 統一資料結構
-│   │   ├── detector.py                # 從訊息文字偵測支援的平台連結（hostname 邊界比對）
-│   │   ├── fallback.py                # 多候選代理網域依序嘗試 + 短期冷卻的共用邏輯
-│   │   ├── flags.py                   # 布林設定讀取輔助
-│   │   ├── http.py                    # 共用 httpx.AsyncClient 設定
-│   │   ├── og_meta.py                 # 通用 Open Graph meta 標籤解析（含 og:video）
-│   │   ├── article.py                 # 通用網頁純文字擷取（關鍵字摘要用，含 SSRF 防護）
-│   │   ├── url_guard.py               # SSRF 防護：驗證任意使用者網址是否可安全連線
-│   │   ├── summary_trigger.py         # 「關鍵字 + 網址」摘要請求偵測
-│   │   ├── bilibili.py                # Bilibili 擷取器（含防 412 標頭，產生 vxbilibili.com 修復連結）
-│   │   ├── instagram.py               # Instagram 擷取器（多候選代理網域 + 原始網域備援）
-│   │   ├── threads.py                 # Threads 擷取器（多候選代理網域 + 原始網域備援）
-│   │   ├── pinterest.py               # Pinterest 擷取器
-│   │   ├── twitter.py                 # Twitter/X 擷取器（多候選代理網域 + 原始網域備援）
-│   │   ├── tiktok.py                  # TikTok 擷取器（多候選代理網域 + 原始網域備援）
-│   │   ├── registry.py                # 平台字串 → 擷取器 對應表
-│   │   └── summarizer.py              # 使用 Gemma 生成內容摘要
-│   ├── logging/                   # 統一日誌設定
-│   ├── minecraft/                 # 珍珠炮計算引擎
-│   ├── music/                     # 音樂播放器引擎
-│   └── system/                    # Settings、Extension Loader
-│
-├── database/                 # SQLite 資料存取層（Repository Pattern）
-│   ├── ai/sqlite.py
-│   └── repository/
-│       ├── audit_repository.py
-│       ├── favorites_repository.py
-│       ├── guild_repository.py
-│       ├── memory_repository.py
-│       ├── mod_repository.py
-│       ├── ticket_repository.py
-│       ├── user_repository.py
-│       └── vc_repository.py
-│
-├── utils/                    # 跨模組工具
-│   ├── async_db.py                # to_thread 裝飾器，讓同步 SQLite 函式可用 await 呼叫
-│   ├── checks.py                  # 權限 check 工廠
-│   ├── discord_errors.py          # Discord 錯誤代碼轉換
-│   ├── formatter.py               # 格式化工具（時長等）
-│   ├── helpers.py                 # 通用輔助函式
-│   └── owner_resolver.py          # Bot Owner ID 解析（含 Team 支援）
-│
-└── tests/                    # pytest 測試（不需 pytest-asyncio，async 邏輯以 asyncio.run() 包裝測試）
+```text
+.
+├── bot.py                         Bot 入口、intents、全域錯誤處理
+├── config.py                      .env 與路徑設定
+├── settings.json                  可熱更新的行為設定
+├── startup.py                     啟動預載
+├── cogs/
+│   ├── ai/                        AI 入口與 Owner 管理
+│   ├── events/                    訊息、狀態與連結預覽 listener
+│   ├── guild/                     伺服器設定
+│   ├── minecraft/                 Minecraft 計算工具
+│   ├── moderation/                管理指令
+│   ├── music/                     音樂指令
+│   ├── roles/                     身份組面板
+│   ├── system/                    Extension、Owner 與 settings 指令
+│   ├── talk/                      代發、Embed、Webhook、typing
+│   ├── ticket/                    工單
+│   ├── utility/                   一般工具、收藏、Markdown 轉換
+│   └── voice/                     Join-to-Create 語音頻道
+├── core/
+│   ├── ai/                        AI 路由、記憶、guard、file parser
+│   ├── link_preview/              URL 偵測、SSRF guard、平台 extractor
+│   ├── logging/                   日誌與 Discord 通報
+│   ├── minecraft/                 計算引擎
+│   ├── music/                     player、queue、song、view
+│   └── system/                    settings、event bus、extension loader
+├── database/
+│   ├── ai/sqlite.py                SQLite connection 與 schema 初始化
+│   └── repository/                 各功能資料存取層
+├── utils/                           權限、錯誤、格式化與共用工具
+├── tests/                           pytest 測試
+└── docs/DEVELOPMENT.md              本文件
 ```
 
----
+## 指令與權限
 
-## 連結預覽（Bilibili／Instagram／Threads／Pinterest／Twitter(X)／TikTok／關鍵字摘要）
+### 權限實作原則
 
-`cogs/events/link_preview.py` 提供兩個彼此獨立、可能同時觸發的功能：
+敏感 Slash Command 同時使用：
 
-### 1. 被動預覽（不需關鍵字，貼連結即觸發）
+- `app_commands.default_permissions(...)`：Discord 側的預設可用性。
+- `app_commands.checks.has_permissions(...)`：Bot 執行期強制授權。
+- `app_commands.checks.bot_has_permissions(...)`：在動作前檢查 Bot 自身權限。
 
-Discord 對 Bilibili 短連結（`b23.tv`）、Instagram、Threads、Pinterest、Twitter/X、TikTok 的原生 Embed 支援不佳，常見完全沒有預覽、只顯示極少資訊，或影片完全無法內嵌。偵測到這六類連結時會自動重新產生一份完整的預覽：
+`default_permissions` 可被 Discord 伺服器的指令覆寫調整，不可單獨當作安全邊界。伺服器專用指令應使用 `guild_only`。Owner Prefix Command 使用 `commands.is_owner()`；Owner Slash Command 委派 `bot.is_owner()`，並支援 Team 擁有的 Discord Application。
 
-1. **偵測**：`core/link_preview/detector.py` 解析網址的 hostname 並比對是否屬於已知平台網域。比對方式是「hostname 完全等於候選網域、或以 `.候選網域` 結尾」，而非單純子字串搜尋——這是因為 `x.com` 這類極短網域若用子字串比對，會誤判像 `xbox.com` 這種完全無關的網址。
-2. **擷取**：依平台呼叫對應擷取器。
-   - **Bilibili**：先解析 `b23.tv` 短連結重定向，再呼叫 Bilibili 公開 API 取得標題、簡介、封面、時長、UP 主與觀看／按讚／投幣／收藏／分享數；請求固定帶上 `Referer` / `Origin` 標頭，避免 Bilibili API 因缺少這兩個標頭回傳 `412`。預設會額外呼叫播放網址 API 取得可下載的影片串流，下載後以附件形式重新上傳，讓影片能在 Discord 聊天室內直接播放（而非只顯示縮圖）。
-   - **Instagram／Threads／Twitter(X)／TikTok**：透過社群維運的公開代理服務，解析頁面的 `og:*` meta 標籤取得標題、說明文字、縮圖、影片網址。這類代理服務由個人或社群維運，生命週期不穩定是常態（網域可能停止解析、暫時回應 502 等），因此每個平台皆設有多個候選網域（見〈設定檔說明〉的 `*_proxy_hosts`），依序嘗試直到成功，單一服務失效不會讓整個平台的預覽功能完全停擺。
-   - **Pinterest**：Discord 對 Pinterest 原生支援尚可但不完整，直接請求頁面解析 `og:*` 標籤，`pin.it` 短連結由 httpx 的 `follow_redirects` 自動處理。
-3. **簡介摘要**：若簡介文字長度超過 `link_preview.summary_trigger_min_chars`，改用 Gemma（`core/ai/models.py` 的 `MODELS["gemma"]`）生成繁體中文摘要取代原文，控制 token 用量。
-4. **影片**：偵測到影片時，會額外把修復網域網址（例如 vxbilibili.com、fxtwitter.com）當作訊息的純文字內容一併送出，讓 Discord 自己的爬蟲原生解析並嵌入可播放的影片；我們自己組的 Embed 負責標題／統計／說明等文字資訊，兩者呈現內容不同、不會重複。這個做法沒有 Discord 附件的檔案大小上限問題，也不需要下載影片消耗頻寬（參考真實案例 FixTweetBot 的做法）。
-5. **組裝與回覆**：組成 Embed（作者列／來源列／統計數據列／標題／縮圖或影片／原始連結）並以回覆方式送出。內文最後固定附上一行「[查看原始貼文](網址)」的可點擊連結，讓使用者不需要額外點擊標題也能清楚看到並前往原始出處；內文超過 `link_preview.embed_description_max_chars` 會自動截斷，避免超過 Discord Embed 長度上限。若 Bot 具備「管理訊息」權限，會嘗試抑制原訊息的低品質原生 Embed。
+### 公開 Slash Commands
 
-**為何不處理 YouTube**：Discord 對 `youtube.com` / `youtu.be` 連結原生就有官方 oEmbed 支援，會自動顯示標題、頻道、縮圖，並提供可直接播放的內嵌播放器，功能已經完整。若我們再額外發一則自製 Embed，同一則連結會出現兩份重複的預覽，是更差的體驗，因此刻意不處理。
+| 指令 | 說明 | 使用環境／條件 |
+|---|---|---|
+| `/ping` | 顯示 WebSocket 延遲 | 伺服器與私訊 |
+| `/botinfo` | 顯示 Bot 狀態、伺服器數與上線時間 | 伺服器與私訊 |
+| `/help` | 顯示已載入 Slash Commands 的分類選單 | 伺服器與私訊 |
+| `/hi` | 問候 | 伺服器與私訊 |
+| `/hyw` | 回覆「何意味」 | 伺服器與私訊 |
+| `/ai <prompt> [model] [file1-3]` | AI 對話；使用者可選 Gemini、Flash 或 Gemma 三類模型池 | 伺服器與私訊；有冷卻與同一使用者並發鎖 |
+| `/markdown <file>` | 將文件轉換為 Markdown 檔回傳 | 伺服器與私訊；受附件大小上限限制 |
+| `/mc pearl ...` | Minecraft 珍珠炮 TNT 配置計算 | 伺服器與私訊 |
+| `/favorite add <url>` | 加入 YouTube 單曲收藏 | 伺服器與私訊；不接受播放清單 |
+| `/favorite list` | 開啟個人收藏面板 | 伺服器與私訊；播放需先加入語音頻道 |
 
-新增其他平台時，只需在 `core/link_preview/` 新增一個擷取器（需要多候選網域容錯時可直接呼叫 `fallback.try_hosts()`）並於 `registry.py` 註冊，`detector.py` 加入網域規則即可，不需修改 Cog 內的事件處理邏輯。
+### 音樂 Slash Commands
 
-### 2. 關鍵字摘要（需明確關鍵字，不限定平台）
+| 指令 | 說明 | 條件 |
+|---|---|---|
+| `/play <mode> <url>` | 播放 YouTube 單曲或歌單 | 使用者必須在一般語音頻道；不可無權移動有聽眾的 Bot |
+| `/queue` | 顯示播放佇列與分頁 | 僅伺服器 |
+| `/clear` | 清空佇列 | 需通過播放器控制檢查 |
+| `/history` | 顯示最近播放記錄 | 僅伺服器 |
+| `/leave` | 讓 Bot 離開語音頻道 | 需通過播放器控制檢查 |
 
-被動預覽只處理上述六個平台；若想針對「任何網址」（新聞、部落格、論壇文章等）取得摘要，需在訊息中包含關鍵字（預設「摘要」，可由 `link_preview.summary_keyword` 調整）並緊接著網址，例如：
-
-```
-摘要https://example.com/news/123
-幫我摘要一下 https://example.com/article
-```
-
-流程：`core/link_preview/summary_trigger.py` 偵測到「關鍵字 + 網址」後，由 `core/link_preview/article.py` 抓取該網址並清理成純文字（移除 script/style 與 HTML 標籤），交給 `summarizer.py` 用 Gemma 生成摘要並回覆；若頁面請求失敗、內容非文字類型、或清理後為空，會直接回覆 `link_preview.summary_fail_message` 設定的訊息（預設「無法擷取這個網址的內容，可能是網站封鎖爬取或內容非純文字頁面。」）。
-
-此功能刻意需要關鍵字才觸發，是因為它會對「任意」網址發送請求並呼叫 Gemma，若像被動預覽一樣自動觸發，會讓每則貼連結的訊息都消耗 API 額度；而 Bilibili／Instagram／Threads／Pinterest 等平台本身多為 JavaScript 單頁應用，直接抓取網頁純文字通常效果不佳，因此這個功能較適合文字內容較完整的一般網頁。
-
-> **設計備註**：曾有另一版 `cogs/events/bilibili.py`（獨立 Cog）與 `core/utils/bilibili.py`（同步版工具函式）的實作方案，內含「Bilibili API 需要 Referer / Origin 標頭避免 412」這個有價值的修正，已併入 `core/link_preview/bilibili.py`；但這兩個檔案本身不會建立在專案中——獨立 Cog 會與本檔案同時處理 Bilibili 連結、造成同一則連結被回覆兩次，`core/utils/bilibili.py` 則會與既有的 `core/link_preview/bilibili.py` 形成兩份平行邏輯、增加日後維護時漏改其中一邊的風險。
-
----
-
-## Slash 指令一覽
-
-### AI
-
-| 指令 | 說明 | 所需權限 |
-|------|------|----------|
-| _(mention)_ | @提及 Bot 開始 AI 對話（限伺服器頻道） | 無 |
-| `/ai <prompt> [file1] [file2] [file3]` | 與 AI 對話，伺服器頻道與私訊皆可使用，最多附 3 個檔案 | 無 |
-
-`/ai` 與 `@提及` 對話共用同一套附件解析與冷卻／並發限制（見
-`core/ai/attachment_utils.py`、`core/ai/request_guard.py`），是同一套
-AI 對話能力的兩種入口，交替使用不會繞過冷卻限制。
-
-AI Owner（Prefix 指令，見下方）
-
----
-
-### 文件工具
-
-| 指令 | 說明 | 所需權限 |
-|------|------|----------|
-| `/markdown <file>` | 上傳文件（pdf／docx／xlsx／xls／pptx 等），轉換成完整的 Markdown（.md）檔案回傳 | 無 |
-
-`/markdown` 直接呼叫 markitdown 取得完整轉換結果並回傳檔案，與
-AI 對話中「附件會被截斷後塞入 prompt」的用途不同，適合單純想要
-文件格式轉換、不需要 AI 額外分析內容的情境。
-
----
-
-### 一般工具
-
-| 指令 | 說明 | 所需權限 |
-|------|------|----------|
-| `/ping` | 顯示 Bot 的 WebSocket 延遲 | 無 |
-| `/botinfo` | 顯示 Bot 版本、延遲、上線時間等資訊 | 無 |
-| `/help` | 分頁瀏覽所有 Slash 指令清單 | 無 |
-| `/hi` | 向 Bot 打招呼 | 無 |
-| `/hyw` | 何意味 | 無 |
-
----
-
-### 音樂播放
-
-| 指令 | 說明 | 所需權限 |
-|------|------|----------|
-| `/play <query>` | 播放歌曲（YouTube URL 或關鍵字搜尋） | 無（需在語音頻道） |
-| `/playlist <url>` | 播放整個 YouTube 播放清單 | 無（需在語音頻道） |
-| `/pause` | 暫停播放 | 無 |
-| `/resume` | 繼續播放 | 無 |
-| `/skip` | 跳過目前歌曲 | 無 |
-| `/stop` | 停止播放並清空佇列 | 無 |
-| `/leave` | 讓 Bot 離開語音頻道 | 無 |
-| `/nowplaying` | 顯示目前播放中的歌曲資訊 | 無 |
-| `/queue` | 查看目前播放佇列 | 無 |
-| `/shuffle` | 隨機打亂佇列 | 無 |
-| `/loop [mode]` | 切換循環模式（off / single / queue） | 無 |
-| `/volume <0-100>` | 調整音量百分比 | 無 |
-| `/remove <index>` | 移除佇列中指定位置的歌曲 | 無 |
-| `/move <from> <to>` | 移動佇列中歌曲的順序 | 無 |
-| `/clear` | 清空播放佇列（不停止目前播放） | 無 |
-| `/history` | 查看最近 10 首播放紀錄 | 無 |
-| `/musicstatus` | 查看所有伺服器的音樂播放狀態 | 管理員 |
-
----
-
-### 音樂收藏清單
-
-| 指令 | 說明 | 所需權限 |
-|------|------|----------|
-| `/fav menu` | 開啟互動選單（取得清單、加入、載入、刪除） | 無 |
-| `/fav add [query]` | 加入收藏：提供網址或關鍵字直接加入；省略則加入目前播放中的歌曲 | 無 |
-| `/fav list` | 查看個人收藏清單（分頁瀏覽） | 無 |
-| `/fav play <index>` | 從收藏清單播放指定編號的歌曲 | 無（需在語音頻道） |
-| `/fav remove <index>` | 從收藏清單移除指定編號的歌曲 | 無 |
-| `/fav clear` | 清空全部個人收藏 | 無 |
-
-互動選單（`/fav menu`）提供以下操作：
-1. 取得最愛歌曲清單
-2. 加入指定歌曲（URL 或關鍵字）
-3. 載入指定的最愛歌曲
-4. 載入全部的最愛歌曲
-5. 從最愛清單刪除指定歌曲
-
----
-
-### 伺服器管理（Moderation）
-
-| 指令 | 說明 | 所需權限 |
-|------|------|----------|
-| `/ban <member> [reason] [delete_days]` | 封禁成員 | 封禁成員 |
-| `/unban <user_id>` | 解除封禁 | 封禁成員 |
-| `/kick <member> [reason]` | 踢出成員 | 踢出成員 |
-| `/mute <member> [minutes] [reason]` | 禁言成員（Discord Timeout） | 管理成員 |
-| `/unmute <member>` | 解除成員禁言 | 管理成員 |
-| `/warn <member> [reason]` | 對成員發出警告並記錄 | 管理成員 |
-| `/warnings <member>` | 查看成員的警告紀錄 | 管理成員 |
-| `/clear_warns <member>` | 清除成員所有警告紀錄 | 管理員 |
-| `/purge [amount]` | 批量刪除頻道訊息（1-100 則） | 管理訊息 |
-| `/modlog` | 查看最近 20 筆管理動作紀錄 | 管理成員 |
-
----
+暂停、繼續、跳過、循環、音量、移除與移動歌曲放在 `MusicControls` 與佇列面板，不另設 Slash Command。
 
 ### 伺服器設定
 
-| 指令 | 說明 | 所需權限 |
-|------|------|----------|
-| `/server log <channel>` | 設定管理動作日誌頻道 | 管理員 |
-| `/server welcome <channel> [message]` | 設定成員加入歡迎訊息頻道 | 管理員 |
-| `/server leave <channel> [message]` | 設定成員離開通知頻道 | 管理員 |
-| `/server autorole <role>` | 設定新成員自動獲得的身份組 | 管理員 |
-| `/server ticket_category <category>` | 設定工單頻道所在分類 | 管理員 |
-| `/server ticket_support <role>` | 設定工單支援身份組 | 管理員 |
-| `/server reset` | 重置所有伺服器設定為預設值 | 管理員 |
+| 指令 | 所需權限 | 說明 |
+|---|---|---|
+| `/server welcome <channel>` | Administrator | 設定歡迎頻道 |
+| `/server leave <channel>` | Administrator | 設定離開訊息頻道 |
+| `/server log <channel>` | Administrator | 設定管理日誌頻道 |
+| `/server autorole [role]` | Administrator | 設定或停用新成員自動身份組 |
+| `/server ticket_category <category>` | Administrator | 設定工單類別 |
+| `/server ticket_support [role]` | Administrator | 設定或停用工單支援身份組 |
+| `/server info` | Manage Server | 查看伺服器設定 |
+| `/server reset` | Administrator | 重置資料庫中的伺服器設定 |
 
----
+### 管理指令
 
-### 工單系統
+| 指令 | 所需權限 | 說明 |
+|---|---|---|
+| `/ban <member> [reason] [delete_days]` | Ban Members | 封禁成員，可刪除 0–7 天訊息 |
+| `/unban <user_id>` | Ban Members | 用 Discord User ID 解除封禁 |
+| `/kick <member> [reason]` | Kick Members | 踢出成員 |
+| `/mute <member> [minutes] [reason]` | Moderate Members | Discord Timeout，最長時間受設定限制 |
+| `/unmute <member>` | Moderate Members | 解除 Timeout |
+| `/warn <member> [reason]` | Moderate Members | 增加警告記錄，可依設定私訊目標 |
+| `/warnings <member>` | Moderate Members | 查看目標的警告記錄 |
+| `/clear_warns <member>` | Administrator | 清除目標的全部警告 |
+| `/purge [amount]` | Manage Messages | 刪除 1–100 則頻道訊息 |
+| `/modlog` | Moderate Members | 查看最近 20 筆管理動作 |
 
-| 指令 | 說明 | 所需權限 |
-|------|------|----------|
-| `/ticket open [topic]` | 開啟新工單（建立私人頻道） | 無 |
-| `/ticket close` | 關閉目前工單（封存或刪除頻道） | 無（支援身份組或本人） |
-| `/ticket add <member>` | 將成員加入工單頻道 | 管理成員 |
-| `/ticket remove <member>` | 從工單頻道移除成員 | 管理成員 |
-| `/ticket stats` | 查看伺服器工單統計 | 管理成員 |
-| `/ticket panel` | 在目前頻道發送「建立工單」按鈕面板 | 管理員 |
-
----
-
-### 身份組面板
-
-| 指令 | 說明 | 所需權限 |
-|------|------|----------|
-| `/roles panel [title] [description]` | 在目前頻道建立身份組自助領取面板 | 管理身份組 |
-| `/roles add <message_id> <role> [label] [emoji] [description] [style]` | 新增身份組按鈕至指定面板 | 管理身份組 |
-| `/roles remove <message_id> <role>` | 從面板移除指定身份組按鈕 | 管理身份組 |
-| `/roles delete <message_id>` | 刪除整個身份組面板 | 管理員 |
-| `/roles forcedelete <message_id>` | 強制刪除面板（含 DB 紀錄） | 管理員 |
-
----
-
-### 臨時語音頻道（JTC）
-
-| 指令 | 說明 | 所需權限 |
-|------|------|----------|
-| `/vc setup <channel>` | 設定「加入即建立」觸發頻道 | 管理員 |
-| `/vc name <name>` | 更改自己臨時頻道的名稱 | 無（需為頻道擁有者） |
-| `/vc limit <0-99>` | 設定自己頻道的人數上限（0 為無限制） | 無（需為頻道擁有者） |
-| `/vc lock` | 鎖定頻道，阻止其他成員加入 | 無（需為頻道擁有者） |
-| `/vc unlock` | 解除頻道鎖定 | 無（需為頻道擁有者） |
-| `/vc permit <member>` | 允許指定成員進入已鎖定的頻道 | 無（需為頻道擁有者） |
-| `/vc reject <member>` | 禁止指定成員進入此頻道 | 無（需為頻道擁有者） |
-| `/vc kick <member>` | 將成員踢出此語音頻道 | 無（需為頻道擁有者） |
-| `/vc transfer <member>` | 將頻道所有權轉移給另一位成員 | 無（需為頻道擁有者） |
-| `/vc info` | 查看目前頻道的設定與擁有者資訊 | 無 |
-
----
+`ban`、`kick`、`mute`、`unmute` 與 `warn` 會檢查自我操作、Bot 目標、管理者與目標的身份組階層。
 
 ### 訊息工具
 
-| 指令 | 說明 | 所需權限 |
-|------|------|----------|
-| `/say <content> [image_url] [message_id] [image1-3]` | 以 Bot 身份在目前頻道發送訊息 | 管理訊息 |
-| `/embed [title] [description] [color] [author] [footer] [thumbnail] [image_url] [message_id]` | 發送自訂 Embed 訊息 | 管理訊息 |
-| `/webhook <content> [username] [avatar_url] [image_url] [message_id] [image1-3]` | 以 Webhook 自訂名稱與頭像發話 | 管理 Webhook |
-| `/typing` | 讓 Bot 在目前頻道持續顯示「正在輸入...」 | 管理訊息 |
-| `/typing_stop` | 停止輸入指示器 | 管理訊息 |
+| 指令 | 所需權限 | 說明 |
+|---|---|---|
+| `/say <content> [...]` | Manage Messages | Bot 以 `「user ID」説：內容` 代發；支援 3 個附件、圖片 URL 與回覆訊息 |
+| `/embed [...]` | Manage Messages | 建立自訂 Embed |
+| `/webhook <content> [...]` | Manage Webhooks | 以自訂名稱與頭像發送 Webhook 訊息 |
+| `/typing` | Manage Messages | 在目前頻道開始持續 typing 指示 |
+| `/typing_stop` | Manage Messages | 停止目前頻道的 typing 指示 |
 
----
+這些指令僅限伺服器。`/say` 會阻止無 Mention Everyone 權限的使用者藉 Bot 觸發 `@everyone` 或大量身份組提及。`/webhook` 具有模擬顯示名與頭像的能力，Manage Webhooks 只應授予可信任的管理者。
 
-### Minecraft 工具
+### 工單
 
-| 指令 | 說明 | 所需權限 |
-|------|------|----------|
-| `/mc pearl <px> <py> <pz> <dest_x> <dest_z> [ground_height]` | 珍珠炮計算機：輸入 84gt 時的珍珠座標與目標，輸出前 10 個 TNT 配置方案 | 無 |
+| 指令 | 所需權限／條件 | 說明 |
+|---|---|---|
+| `/ticket open [topic]` | 公開；受冷卻與每人上限限制 | 建立私密工單頻道 |
+| `/ticket close` | 工單建立者、支援身份組或 Manage Channels | 封存或刪除目前工單 |
+| `/ticket add <member>` | Moderate Members | 將成員加入目前工單 |
+| `/ticket remove <member>` | Moderate Members | 將成員移出目前工單 |
+| `/ticket stats` | Moderate Members | 顯示伺服器工單統計 |
+| `/ticket panel` | Administrator | 發送持久化的工單建立面板 |
 
----
+### 身份組面板
 
-### Owner 專用 Slash 指令
+| 指令 | 所需權限 | 說明 |
+|---|---|---|
+| `/roles panel [title] [description]` | Manage Roles | 建立面板 |
+| `/roles add <message_id> <role> [...]` | Manage Roles | 新增身份組按鈕，單一面板最多 25 個 |
+| `/roles remove <message_id> <role>` | Manage Roles | 移除身份組按鈕 |
+| `/roles delete <message_id>` | Administrator | 刪除面板訊息與資料庫記錄 |
+| `/roles list` | Manage Roles | 列出伺服器面板 |
 
-以下指令僅限 Bot 擁有者（`OWNER_ID`）執行：
+面板不允許 `@everyone`、整合管理身份組、不低於 Bot 的身份組，或不低於操作者的身份組。面板資料與操作伺服器 ID 必須一致。
+
+### 臨時語音頻道
+
+| 指令 | 所需權限／條件 | 說明 |
+|---|---|---|
+| `/vc setup <channel> [category] [template] [limit]` | Administrator | 設定 Join-to-Create 觸發頻道 |
+| `/vc name <name>` | 臨時頻道擁有者 | 改名 |
+| `/vc limit <0-99>` | 臨時頻道擁有者 | 設定人數上限 |
+| `/vc lock` / `/vc unlock` | 臨時頻道擁有者 | 鎖定或解鎖 |
+| `/vc permit <member>` | 臨時頻道擁有者 | 允許成員加入 |
+| `/vc reject <member>` | 臨時頻道擁有者 | 拒絕成員，若已在頻道內則移出 |
+| `/vc kick <member>` | 臨時頻道擁有者 | 將成員移出 |
+| `/vc transfer <member>` | 臨時頻道擁有者 | 轉移擁有權，目標必須在頻道內 |
+| `/vc info` | 伺服器成員 | 顯示目前臨時頻道資訊 |
+| `/vc forcedelete <channel>` | Administrator | 強制刪除臨時頻道 |
+
+### Owner Slash Commands
 
 | 指令 | 說明 |
-|------|------|
-| `/reply [content] [user_id]` | 以 Bot 身份私訊最近一筆私訊者，或指定 user_id 的使用者 |
-| `/talk <user> <content> [image]` | 讓 Bot 主動私訊指定使用者 |
+|---|---|
+| `/reply [content] [user_id]` | 回覆指定使用者，或最近私訊 Bot 的使用者 |
+| `/talk <user> <content> [image]` | 主動私訊指定使用者 |
 
----
+兩者均使用 `bot.is_owner()` 執行期驗證。
 
-## Prefix 指令一覽
+### Owner Prefix Commands
 
-預設前綴為 `$`，可在 `settings.json` 的 `bot.command_prefix` 調整。
-
-### 系統管理（Owner 專用）
+預設前綴為 `$`，可用 `bot.command_prefix` 調整。以下指令全部受 `commands.is_owner()` 保護：
 
 | 指令 | 說明 |
-|------|------|
-| `$game [type] <text>` | 設定 Bot 的活動狀態（遊玩 / 收聽 / 觀看 / 競賽），並持久化至 settings.json |
-| `$slash` | 將 Slash Commands 同步至全域（最多 1 小時生效） |
-| `$slash_guild` | 即時將 Slash Commands 同步至目前伺服器（測試用） |
-| `$settings` | 顯示 settings.json 管理子指令清單 |
-| `$settings show [section]` | 顯示 settings.json 的設定值（可指定區塊） |
-| `$settings reload` | 強制重新載入 settings.json 並套用 Bot 狀態 |
-| `$load <extension>` | 載入指定 Cog extension（支援逗號分隔多個） |
-| `$unload <extension>` | 卸載指定 Cog extension |
-| `$reload <extension>` | 重新載入指定 Cog extension |
-| `$bot_reload` | 重新載入所有已載入的 Cog extension |
+|---|---|
+| `$help` | 顯示已載入的 Prefix Commands |
+| `$game [type] <text>` | 設定並持久化 Bot presence |
+| `$slash` | 同步全域 Slash Commands |
+| `$slash_guild` | 清除目前伺服器殘留的重複 Slash Commands |
+| `$load <extension>` | 載入 Extension |
+| `$unload <extension>` | 卸載 Extension |
+| `$reload <extension>` | 重載 Extension |
+| `$bot_reload` | 重載所有已載入 Extension |
 | `$bot_stop` | 安全關閉 Bot |
+| `$settings` | 顯示 settings 子指令 |
+| `$settings show [section]` | 顯示全部設定或指定 section |
+| `$settings reload` | 強制重載 `settings.json` 並更新 presence |
+| `$status <presence> <type> <text>` | 設定並持久化 Bot 的在線與活動狀態 |
+| `$status_show` | 顯示目前 Bot 狀態設定 |
+| `$musicstatus` | 顯示所有伺服器的音樂播放狀態 |
+| `$tier <member> <0-3>` | 設定 AI 社交等級 |
+| `$ban <member> [reason]` | 禁止成員使用 AI；不是 Discord 封禁 |
+| `$unban <member>` | 解除 AI 使用禁止 |
+| `$unrestrict <member>` | 解除 abuse guard 的暫時限制 |
+| `$記憶 <keyword> <importance> '<content>'` | 建立 1–5 重要度的全域 AI 記憶；別名 `$memory` |
+| `$刪記憶 <keyword>` | 刪除全域記憶；別名 `$delmemory`、`$memorydel` |
+| `$社交` | 顯示所有 AI 社交資料；別名 `$social` |
+| `$info [member]` | 顯示 AI 用量統計 |
+| `$info summary <member>` | 強制產生指定成員的對話摘要 |
+| `$dashboard` / `$db` | AI 系統總覽 |
+| `$dashboard user` | 30 天 Token 用量排行 |
+| `$dashboard cache` | 查看並清理搜尋快取 |
+| `$dashboard state` | 顯示非 normal 對話狀態 |
+| `$dashboard clear <member>` | 清除成員對話狀態 |
+| `$dashboard prompt` | 列出 prompt 模板 |
+| `$dashboard set <name>` | 啟用 prompt 模板 |
+| `$dashboard off` | 停用自訂模板 |
+| `$dashboard del <name>` | 刪除 prompt 模板 |
+| `$dashboard audit` | 顯示最近的 AI 管理審計記錄 |
+| `$dashboard rules [reload]` | 顯示或重載內容審核規則 |
 
-`$game` 用法範例：
+## 設定系統
+
+### 分工
+
+- `.env` / `config.py`：Token、API Key、Owner ID、DB 路徑與 Extension 掃描範圍。
+- `settings.json` / `core/system/settings.py`：非機密、可調整的行為參數。
+- 伺服器專屬設定：儲存於 SQLite，由 `/server ...` 管理。
+
+`settings.py` 依 `settings.json` 的 mtime 自動重載，通常在下一次讀取時就會生效。如需立即驗證，可執行 `$settings reload`。無效 JSON 不會覆蓋最後一份成功載入的快取。
+
+### `settings.json` 主要設定
+
+| Section | 重要欄位 |
+|---|---|
+| `bot` | `command_prefix`、`status_type`、`status_text`、`presence`、`startup_timeout` |
+| `ai` | 預設模型、冷卻、回覆長度、附件上限、人設、記憶/摘要門檻、搜尋快取、abuse guard 與告警門檻 |
+| `music` | 佇列上限、閒置斷線、音量、FFmpeg 路徑、語音連線逾時、健康檢查、收藏分頁 |
+| `ticket` | 頻道前綴、類別名稱、封存類別、冷卻與每人上限 |
+| `voice_channel` | 預設頻道名稱、人數上限、JTC 頻道 ID 與類別 ID |
+| `guild` | 歡迎與離開訊息樣板 |
+| `moderation` | 預設/最長 Timeout 分鐘、警告與 Timeout 私訊通知 |
+| `embed_footer` | 一般與音樂 Embed 頁腳 |
+| `dm` | 私訊轉發快取上限與 Owner 回覆前綴 |
+| `link_preview` | 啟用狀態、單則上限、快取、HTTP 逾時、摘要關鍵字/長度、SSRF 讀取上限、平台代理網域 |
+
+歡迎/離開樣板支援 `{user}`、`{username}`、`{guild}` 與 `{count}`。Presence `status_type` 實際支援 `playing`、`listening`、`watching` 與 `competing`；其他值會回退到 `listening`。
+
+`link_preview.bilibili_fetch_video` 目前是相容性欄位：現行 Bilibili 流程只解析 `b23.tv` redirect 與 BVID，產生 `vxbilibili.com` 修復連結，不呼叫 Bilibili API，也不下載影片。
+
+## 核心子系統
+
+### AI
+
+`cogs/ai/ai_command.py` 與 `cogs/ai/chat.py` 是兩個入口，共用：
+
+- `request_guard`：每使用者並發鎖與冷卻。
+- `attachment_utils` 與 `file_parser/`：附件讀取、媒體分類與內容提取。
+- `agent_router`：模型選擇與手動 override。
+- `content_guard` / `abuse_guard`：內容審核、使用速率與暫時限制。
+- `memory_manager`、`context_manager` 與 `user_context`：短期上下文、長期記憶、摘要與社交狀態。
+- `budget`：記錄請求、Token 與錯誤。
+
+AI 使用 Gemini 串流產生回覆，首段文字到達後立即發送，後續依
+`ai.stream_update_interval_seconds` 節流更新同一則 Discord 訊息。回覆超過
+`ai.max_reply_length` 時會以 `.txt` 附件回傳。單一模型的閒置逾時由
+`ai.model_timeout_seconds` 控制，每次請求最多嘗試 `ai.max_model_attempts` 個模型。
+
+上下文預設取回 100 筆歷史候選訊息與 10 筆最近訊息；對應設定為
+`ai.message_candidate_limit` 與 `ai.recent_message_limit`。附件會以
+`ai.attachment_concurrency` 為上限平行下載與解析。
+
+### 音樂
+
+`core/music/service.py` 管理每伺服器的 Player。`Player` 負責連線、播放、閒置計時與健康檢查；`Queue` 負責佇列、循環與歷史；`Song` 使用 yt-dlp 解析 YouTube；`views.py` 實作互動控制與權限驗證。
+
+Player 會避免一般成員將仍有聽眾的 Bot 移到其他語音頻道。佇列上限、連線逾時與閒置斷線均可設定。
+
+### 連結預覽與網頁摘要
+
+`cogs/events/link_preview.py` 只處理伺服器中非 Bot 訊息：
+
+1. `detector.py` 以 hostname 邊界偵測支援平台。
+2. Bilibili 解析 BVID，必要時追蹤 `b23.tv` redirect，再回覆 `vxbilibili.com` 修復連結。
+3. Instagram、Threads、Twitter/X 與 TikTok 依序嘗試設定中的代理網域；Pinterest 解析頁面 metadata。
+4. 其他平台轉為 `LinkPreview`，必要時用 Gemma 摘要後組成 Embed。
+5. `摘要 <url>` 會經 `url_guard.py` 做 SSRF 防護，拒絕內網、loopback 與不安全目標。
+
+代理服務由第三方維運，單一網域失效是可預期情況。`fallback.py` 會記錄暫時失敗並調整嘗試順序。
+
+### 持久化 Discord Views
+
+工單關閉按鈕、工單建立面板與身份組面板使用 `timeout=None` 與穩定 `custom_id`。Bot 重啟後，Cog 會重新註冊 View；身份組面板會從 SQLite 重建按鈕。
+
+## 資料庫
+
+`DB_PATH` 預設為 `database/ai/memory.db`。各 Repository 負責：
+
+| Repository | 資料 |
+|---|---|
+| `user_repository.py` | AI 使用者與狀態 |
+| `memory_repository.py` | 記憶、摘要與向量相關資料 |
+| `audit_repository.py` | AI 管理操作審計 |
+| `favorites_repository.py` | 個人音樂收藏 |
+| `guild_repository.py` | 伺服器頻道、自動身份組與工單設定 |
+| `mod_repository.py` | 警告與管理動作 |
+| `ticket_repository.py` | 工單狀態 |
+| `vc_repository.py` | Join-to-Create 設定與臨時頻道擁有者 |
+
+多數會在 async Discord handler 中頻繁呼叫的同步 SQLite 函式應使用 `utils.async_db.to_thread`，避免阻塞 event loop。
+
+備份前建議停止 Bot，或使用 SQLite 的一致性備份機制；不要在 Bot 寫入時只複製主資料庫檔而忽略可能的 journal/WAL。
+
+## 開發 Cog
+
+### 基本範本
+
+```python
+from __future__ import annotations
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+
+class Example(commands.Cog):
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+
+    @app_commands.command(name="example", description="範例指令")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_messages=True)
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.checks.bot_has_permissions(send_messages=True)
+    async def example(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message("完成", ephemeral=True)
+
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(Example(bot))
 ```
-$game 薩姆戰甲              → 使用目前設定的類型（預設 playing）
-$game playing 薩姆戰甲      → 遊玩中：薩姆戰甲
-$game listening /play | @我 → 收聽中：/play | @我
-$game watching you          → 觀看：you
+
+### 規約
+
+- 每個可載入模組必須提供 `async def setup(bot)`。
+- 檔名不可以 `_` 開頭；`__init__.py` 不會當作 Extension 載入。
+- 開發期可用 `$reload cogs.example` 重載，或使用短名。
+- 新增/刪除 Slash Command 後要執行 `$slash`；若同一指令出現兩次，在該伺服器執行 `$slash_guild` 清除舊的伺服器版。
+- 互動可能超過 3 秒時，先 `interaction.response.defer()`，之後使用 `interaction.followup.send()`。
+- 必須處理 Discord 的 2,000 字訊息、Embed field 1,024 字、25 fields 與 View 25 components 限制。
+- 後台 task 必須在 `cog_unload()` 中 cancel 與清理。
+- 持久化 View 必須使用 `timeout=None` 與固定 `custom_id`，並在重啟時重新註冊。
+- 使用者網址的主機端請求必須先經 SSRF 驗證。
+- 使用 `logging.getLogger("bot.<area>")`，不要用 `print()` 處理運行期錯誤。
+- 新的非機密設定要同時加入 `settings.json` 與 `core/system/settings.py` 的 `_DEFAULTS`。
+- 敏感指令的 Discord 預設權限與 Bot 執行期權限必須一致。
+
+## 測試與檢查
+
+### pytest
+
+```bash
+python -m pytest -q
 ```
 
-`$settings show` 可用 section：
-`bot` / `ai` / `music` / `ticket` / `voice_channel` / `guild` / `moderation` / `embed_footer` / `link_preview`
+測試不依賴 `pytest-asyncio`；async 案例使用 `asyncio.run()`。`tests/conftest.py` 負責測試時的環境與 import path。
 
-### AI 系統管理（Owner 專用）
+權限回歸測試會掃描所有 Cog，確保每個使用 `default_permissions` 的指令同時具有執行期 `has_permissions`。
 
-| 指令 | 說明 |
-|------|------|
-| `$tier <user_id> [level]` | 查看或設定使用者的 AI 互動階層（0-5） |
-| `$ban <user_id> [reason]` | 禁止使用者使用 AI 功能 |
-| `$unban <user_id>` | 解除 AI 功能封禁 |
-| `$unrestrict <user_id>` | 解除使用者的濫用限制 |
-| `$記憶 <keyword> <content>` | 設定全域記憶（別名：`$memory`） |
-| `$刪記憶 <keyword>` | 刪除全域記憶（別名：`$delmemory`、`$memorydel`） |
-| `$社交` | 輸出所有使用者的社交檔案（別名：`$social`） |
-| `$dashboard` | 顯示 AI 系統狀態（別名：`$db`） |
-| `$info` | 顯示 AI 使用說明 |
+### 語法與靜態檢查
 
-AI 使用者階層說明：
-
-| 等級 | 名稱 | 說明 |
-|------|------|------|
-| 0 | 陌生人 | 初次互動，基礎功能 |
-| 1 | 朋友 | 互動達到一定次數後升級 |
-| 2 | 好友 | 長期互動使用者 |
-| 3 | 摯友 | 高度信任使用者 |
-| 4 | 開拓者 | 進階功能開放 |
-| 5 | 管理員 | 最高階層 |
-
----
-
-## 權限對照表
-
-| Discord 權限 | 對應指令 |
-|-------------|----------|
-| 無（任何人） | /ping /botinfo /help /hi /hyw /ai /markdown /play /pause /resume /skip /stop /leave /nowplaying /queue /shuffle /loop /volume /remove /move /clear /history /fav* /ticket open /vc name /vc limit /vc lock /vc unlock /vc permit /vc reject /vc kick /vc transfer /vc info |
-| 管理訊息 | /say /embed /typing /typing_stop |
-| 管理 Webhook | /webhook |
-| 管理成員 | /mute /unmute /warn /warnings /purge /modlog /ticket add /ticket remove /ticket stats |
-| 管理員 | /ban /unban /kick /clear_warns /server* /ticket panel /roles delete /roles forcedelete /musicstatus /server reset /vc setup |
-| 管理身份組 | /roles panel /roles add /roles remove |
-| Bot 擁有者 | /reply /talk 及所有 $ 指令 |
-
----
-
-## 已知問題與排除
-
-### 私訊轉發不工作
-
-檢查以下項目：
-
-1. `.env` 中 `OWNER_ID` 是否正確填寫
-2. Bot 與 Owner 是否有共同的伺服器（缺少共同伺服器時無法傳送 DM）
-3. Owner 是否已開啟「接受伺服器成員的私訊」
-
----
-
-### 連結預覽某平台完全沒有反應
-
-Instagram／Threads／Twitter(X)／TikTok 的預覽依賴社群維運的第三方代理服務，這類服務並非官方維護，網域可能停止解析或暫時故障。系統已對每個平台設定多個候選網域並依序自動嘗試（見〈設定檔說明〉的 `link_preview.*_proxy_hosts`），全部代理都失敗後還會再退回原始網址本身試一次（`core/link_preview/fallback.py`），但若連原始網址都取不到可用內容，該平台的預覽就會完全沒有反應。
-
-失敗過的候選網域會在 `link_preview.dead_host_cooldown_seconds`（預設 300 秒）內被優先跳過，加速後續請求；若全部候選都在冷卻中，仍會照樣全部嘗試一輪，不會因此完全停擺。
-
-排除步驟：
-
-1. 查看 log 中 `[連結預覽]` 或對應平台（`bot.link_preview.instagram` 等）的錯誤訊息，確認是 DNS 無法解析（`nodename nor servname provided`）還是伺服器錯誤（`502` / `503`）
-2. 搜尋該平台目前仍在運作的代理服務網域，更新 `settings.json` 對應的 `*_proxy_hosts` 陣列，執行 `$settings reload` 立即生效，不需重啟 Bot
-3. 若只是暫時性的伺服器錯誤（502／503），通常等待一段時間後會自行恢復，不需要更換網域
-
----
-
-### 連結預覽沒有反應 / 資訊不完整
-
-檢查以下項目：
-
-1. `settings.json` 的 `link_preview.enabled` 是否為 `true`
-2. Bot 的 Intents 是否已開啟 `message_content`（讀不到訊息文字就偵測不到連結或關鍵字）
-3. **Instagram／Threads／Pinterest 屬於平台本身限制**：三者未登入狀態下頁面能取得的 `og:*` 標籤本來就有限，有時只能取得標題與極少描述，屬於預期行為而非程式錯誤；如需更完整資料，需要額外串接登入態 Cookie（尚未內建，可依 `core/link_preview/instagram.py`／`threads.py`／`pinterest.py` 內的註解自行擴充）。
-4. 影片沒有嵌入播放：確認 `link_preview.attach_video` 是否為 `true`；若該平台目前所有代理網域都失敗，會直接退回「僅文字資訊 + 連結」，可參考本文件〈連結預覽某平台完全沒有反應〉一節排除。
-5. Bilibili API 回傳 `412`：已固定在請求加上 `Referer` / `Origin` 標頭修正，若仍發生，可能是 Bilibili 端另外調整了防爬機制，需重新確認所需標頭。
-
-### 「摘要」關鍵字沒有反應 / 一直回覆無法擷取
-
-檢查以下項目：
-
-1. 關鍵字是否與 `settings.json` 的 `link_preview.summary_keyword` 一致（預設為「摘要」，需完整符合，不支援同義詞）
-2. 網址是否緊接在關鍵字之後的同一則訊息內
-3. 目標網站是否為需要登入或大量依賴 JavaScript 渲染的頁面（例如單頁應用），此類網站伺服器端回傳的 HTML 本身文字量就很少，屬於純文字擷取方式的固有限制，不是程式錯誤
-4. `.env` 的 `GEMINI_API` 是否正確設定，缺少此金鑰時摘要會直接失敗
-
----
-
-### embedding 模型 404 錯誤（已修正）
-
-log 中曾出現：
-```
-embed error: 404 NOT_FOUND. models/text-embedding-004 is not found for API version v1beta
+```bash
+python -m compileall -q cogs core database utils tests
+ruff check .
+mypy .
 ```
 
-**實際原因**：不是 v1beta／v1 端點的問題（先前這裡的猜測不正確），
-而是 `text-embedding-004` 這個模型本身已於 2026/1/14 正式棄用，
-Google 官方後繼模型是 `gemini-embedding-001`，呼叫介面相容（只需
-替換模型名稱）。已修正 `core/ai/models.py` 的 `EMBED_MODEL` 常數，
-問題已解決，不需要再手動排除。
+Ruff 與 mypy 規則位於 `pyproject.toml`。若目前環境沒有這些工具，需另行安裝。
 
-若未來又看到類似的 404，通常代表模型又被棄用了，可查詢
-[Google 官方模型清單](https://ai.google.dev/gemini-api/docs/embeddings)
-確認目前建議使用的嵌入模型名稱。
+## 維運與故障排除
 
-若資料庫中留有舊模型（768 維）產生的向量：`gemini-embedding-001`
-預設輸出 3072 維，維度不同時 `core/ai/memory_manager.py` 的
-`_cosine()` 會直接視為不相似（回傳 0），不會噴錯，但也不會比對到；
-純語意搜尋以外的關鍵字比對不受影響。如需讓舊資料也能被語意搜尋
-比對到，需要用新模型重新產生一次向量（目前沒有自動遷移工具）。
+### Slash Command 未出現或仍顯示舊指令
 
----
+1. 確認邀請 scopes 包含 `applications.commands`。
+2. 查看啟動日誌的 Cog 載入與 Slash 同步結果。
+3. 執行 `$slash` 同步全域指令；若 Discord 選單有重複項目，再於該伺服器執行 `$slash_guild`。
+4. 全域同步不一定立即出現，可重開 Discord 客戶端再查看。
 
-### Gemini 500 錯誤 / 超時
+### Cog 載入失敗
 
-偶發的上游 API 錯誤，已實作自動重試（最多 3 次）與模型 fallback 機制：
-- 主要模型失敗 → 自動降級至備用模型
-- 連備用模型也失敗 → 回覆使用者錯誤訊息
+- 執行 `python -m compileall -q cogs` 查找語法錯誤。
+- 確認模組有 `async def setup(bot)`。
+- 確認 import 使用專案根目錄為基準，且沒有缺少 dependency。
+- 查看是否被 `EXTENSION_BLACKLIST` 或 `EXCLUDED_DIRS` 排除。
 
----
+### 權限不足
 
-## Changelog
+- 使用者需同時符合 Slash Command 執行期權限與 Discord 頻道 overwrite。
+- Bot 需擁有對應權限，且身份組階層必須高於管理目標。
+- 指令在選單中被隱藏，可能是 Discord 伺服器的指令覆寫或 `default_permissions` 造成。
+- 指令看得到但執行被拒絕，代表執行期 check 未通過。
 
-### 本輪：資料庫存取全面非同步化
+### 音樂無法播放
 
-稽核報告中規模最大的一項：全專案約 60 個 SQLite 存取函式（`database/repository/` 底下 8 個檔案）原本全是同步函式，卻直接被 async 函式呼叫，等於每一次資料庫讀寫都會佔用事件迴圈直到查詢完成。新增 `utils/async_db.py` 提供 `to_thread` 裝飾器，讓 repository 函式定義時套用一次，呼叫端改用 `await` 呼叫、實際執行委派給背景執行緒池。`init_tables()` 系列函式不套用（只在啟動時執行一次，且已經整個被 `bot.py` 的 `await asyncio.to_thread(initialize)` 包住）。
+- 確認 `ffmpeg -version` 可執行，或設定 `music.ffmpeg_path`。
+- 確認 Bot 在語音頻道具有 Connect 與 Speak。
+- 確認 PyNaCl 已安裝。
+- yt-dlp 與 YouTube 行為會變動，解析失敗時先更新 yt-dlp 並查看 log。
 
-依規模由小到大逐一處理並各自完整測試：`audit_repository.py` → `favorites_repository.py` → `guild_repository.py` → `mod_repository.py` → `ticket_repository.py` → `vc_repository.py` → `user_repository.py`（19 個函式，連鎖影響 `core/ai/user_context.py`、`core/ai/abuse_guard.py`、`core/ai/admin_service.py` 幾乎整個服務層改為 async）→ `memory_repository.py`（14 個函式，`core/ai/memory_manager.py` 的 `search()` 全面非同步化）。
+### AI 無法回覆
 
-**core/ai/memory_manager.py／context_manager.py**：`search()` 原本是同步函式，`context_manager.py` 用 `loop.run_in_executor()` 包一層丟到執行緒池執行；`search()` 內五個彼此獨立的查詢（background／記憶／訊息／最近對話／摘要）也是依序等待。改為 `search()` 本身是 `async def`，五個查詢改用 `asyncio.gather()` 平行執行，`context_manager.py` 不再需要 `run_in_executor` 包裝，直接 `await`，程式碼更簡單、平均延遲也更低。
+- 確認 `GEMINI_API` 已設定且有效。
+- 確認模型名稱、配額與 Google API 回應。
+- 查看使用者是否被 `$ban` 永久封鎖或 abuse guard 暫時限制。
+- 使用 `$dashboard`、`$dashboard audit` 與 log 定位問題。
 
-**core/ai/user_context.py**：`get_user_info()` / `get_user_context()` 內多個查詢同樣改用 `asyncio.gather()` 平行執行。`dump_social()` 原本繞過 repository 層自行開連線查詢三張表，抽成獨立的輔助函式並套用 `to_thread`，與其餘資料庫存取方式一致。
+### 連結預覽無反應
 
-**測試**：`tests/test_abuse_guard.py`、`tests/test_memory_manager.py` 改寫為 `asyncio.run()` 包裝呼叫；`tests/test_ai_multimodal_flow.py` 的 mock 函式（`get_user_info`／`memory_search` 等）改為 `async def`，因為 `await` 一個非 coroutine 的回傳值會直接拋出 `TypeError`，`asyncio.create_task()` 收到非 coroutine 也會直接拋出例外。全部修改逐檔完成後皆重新執行完整測試套件與 `ExtensionLoader` 全模組載入驗證，最終 78 項測試、26 個模組、47 個 Slash 指令全數正常。
+- 確認 `link_preview.enabled` 為 `true`。
+- Bilibili 短連結需能夠追蹤 `b23.tv` redirect。
+- Instagram、Threads、Twitter/X 與 TikTok 依賴第三方代理；若全部候選網域失效，功能會略過該連結。
+- `摘要 <url>` 會拒絕私有 IP、localhost、不安全 redirect 或過大回應。
 
----
+### 日誌
 
-### 上一輪：log 問題修正 + 第三方稽核報告優先項目
+LogManager 會將日誌輸出至終端與輪替檔案。實際目錄、檔名、大小與保留數由 `core/logging/constants.py` 定義。ERROR 級別可透過 DiscordErrorHandler 通知 Owner，關機時會儘量傳送本次 session 摘要。
 
-使用者提供一份實際運作 20 小時、16.7MB 的真實 log 檔案，以及兩份第三方稽核報告（深度稽核、未來優化路線圖）。稽核報告條列的項目規模很大（含完整的 AutoMod／AntiRaid 系統、70+ 處同步 SQLite 呼叫的全面非同步化等，屬於數週等級的工程量），本輪聚焦處理 log 檔案暴露的具體問題，以及稽核報告中風險最高、範圍明確、可以在合理範圍內完成的項目；規模較大的架構性項目留在稽核報告與路線圖文件中，作為後續分階段處理的依據，不在本輪倉促處理，以免範圍過大反而引入新的錯誤。
+## 安全原則
 
-**log 問題（源自實測 log 檔案）**
+- `.env`、SQLite 資料庫、log 與使用者上傳的暫存內容不應提交到 Git。
+- Token 或 API Key 如曾出現在 log、commit、螢幕擷圖或聊天訊息中，應立即輪換。
+- 新的管理指令不得只使用 `default_permissions`。
+- 所有以伺服器、頻道或訊息 ID 查詢的資料必須再核對 guild ID，避免跨伺服器操作。
+- 刪除、封鎖、轉移與代發要有可追溯的執行者資訊。
+- Webhook 代發與 Owner 私訊能力屬於高信任功能，不應向一般身份組開放。
+- 使用者提供的 URL、檔案與壓縮檔必須有 scheme、主機、容量、數量、解壓後大小與逾時上限。
+- 開發者應使用最小權限測試帳號，不只用 Administrator 帳號驗證。
 
-- **core/logging/log.py**：修正第三方套件 DEBUG 雜訊灌爆 log 檔案的問題。實測發現使用者上傳一份 PDF 讓 markitdown 解析時，底層 pdfminer.six 記錄極其詳細的逐一 token DEBUG 訊息，單一份 PDF 就產生超過 20 萬行、佔整份 log 檔案 99.63% 的體積。根本原因是 root logger 設為 DEBUG，第三方套件沒有各自設定層級因而全部繼承。原本只窄範圍列出 discord.py 幾個 logger 來壓制，改為更通用的做法：root logger 預設為 WARNING（涵蓋所有第三方套件，含未來新增的），我們自己的 logger 才依命名空間明確設回 DEBUG。實測驗證：pdfminer、httpcore、以至於一個假設的未來函式庫，皆自動被壓制在 WARNING，不需要之後再回來加清單。
-- **core/logging/constants.py**：修正 `LOG_MAX_BYTES` 從 50MB 改為 7MB。關機報告會把整份 log 私訊給 Owner，先前的門檻通過（16.7MB < 50MB）但 Discord 實際拒絕上傳（413 Payload Too Large），代表這道自訂門檻完全沒有真正發揮作用。查證 Discord 對 Bot 上傳的實際限制約 8MB，改為 7MB 留安全餘裕。
-- **core/logging/log.py／constants.py**：新增以大小為準的 log 檔案輪替（`RotatingFileHandler`，20MB／保留 5 份），避免 Bot 長時間不重啟持續運作時，單一 log 檔案無上限成長。
-- **cogs/events/status.py**：修正 `_apply()` 未接住 `change_presence()` 例外的問題。實測 log 出現連線剛重連、還不穩定時呼叫 `change_presence()` 拋出 `ClientConnectionResetError`，沒有 try/except 會直接冒出到 discord.py 的通用 `on_ready` 例外處理器，印出一長串看起來很嚴重但其實不影響其他功能的 traceback。改為捕捉例外並以 WARNING 記錄。
-
-**Bilibili 影片嵌入失效（使用者提供截圖回報）**
-
-- **core/link_preview/bilibili.py**：修正 `embed_video_link` 網址雜訊問題。透過 Bilibili App 分享按鈕複製的連結會附帶大量追蹤參數（`buvid`、`from_spmid`、`mid`、`share_session_id`、`unique_k`、`up_id` 等，可長達數百字元），原本直接對整個原始網址做網域替換，vxbilibili.com 收到這種塞滿雜訊參數的網址會處理失敗，導致 Discord 完全沒有產生原生嵌入，訊息裡只剩一行含大量追蹤參數的醜陋純文字連結。改為只用已解析出的 bvid 組出乾淨網址（`https://vxbilibili.com/video/{bvid}/`）。已用截圖中出現的實際網址模式驗證修正有效。
-
-**第三方稽核報告 P1 項目**
-
-- **database/ai/sqlite.py**：修正 `DB_PATH` 環境變數被完全忽略的問題。原本資料庫路徑寫死為固定值，不論 `.env` 裡的 `DB_PATH` 設定成什麼都不會生效。改為實際讀取 `config.DB_PATH`：相對路徑解析到專案根目錄下，絕對路徑則直接使用。
-- **core/ai/attachment_utils.py**：修正非圖片附件在檢查大小前就先完整下載的問題。`read_image_part()` 原本就正確地在下載前用 `attachment.size` 檢查大小，但 `parse_attachment_file()` 沒有比照辦理，會先把整個檔案存到暫存檔，之後才由 file_parser 用磁碟上的實際大小判斷是否超過上限——對明顯超過上限的大檔案而言，等於白白下載一次才拒絕。補上下載前的大小檢查，兩者行為現在一致。
-- **core/link_preview/url_guard.py（新增）／article.py**：修正 SSRF（Server-Side Request Forgery）風險。「摘要 <網址>」這個關鍵字觸發功能，原本直接對使用者提供的任意網址發送請求，沒有任何驗證，理論上可被用來讓 Bot 對內網服務或雲端 metadata 端點（169.254.169.254）發送請求。新增 `url_guard.is_safe_url()`：驗證 scheme 僅允許 http/https，並檢查解析出的每一個 IP 是否落在私有網段、迴路、連結本地等範圍。同時關閉 httpx 的自動追隨重定向，改為手動逐跳處理，每一跳都重新驗證——這是關鍵的一步，因為若只驗證最初的網址，伺服器只要用 3xx 導向到內網位址就能繞過檢查。另外加上回應大小上限（預設 3MB），避免惡意網站回傳超大內容造成記憶體用量失控。已寫成 9 項正式測試（`tests/test_url_guard.py`），涵蓋雲端 metadata 端點、內網網段、非 http(s) 協定、以及「重定向到內網位址會被擋下」這個最關鍵的情境。
-- **core/link_preview/http.py**：`build_client()` 新增 `follow_redirects` 參數（預設 `True`，其餘擷取器不受影響），供 `article.py` 需要手動驗證每一跳重定向時使用。
-
-**本輪暫不處理、留待後續分階段進行的項目**（詳見稽核報告與路線圖文件）：
-- ~~70+ 處同步 SQLite 呼叫尚未非同步化~~ → 已於下一輪（見上方「資料庫存取全面非同步化」）完成
-- AutoMod／AntiRaid／AntiScam／新成員驗證系統（全新子系統，非既有程式碼修正範疇）
-- 錯誤訊息 ID 化、log 內容遮罩敏感資訊、CI 自動化等，屬於錦上添花但非緊急的項目
-
----
-
-### 上一輪：參考 FixTweetBot 修正影片截取邏輯
-
-實測比對真實案例 [FixTweetBot](https://github.com/dziurwa/FixTweetBot)（一款成熟的公開 Discord 連結修復 Bot，支援數十種平台含 Bilibili）的原始碼後，發現我們原本「下載影片位元組、重新包裝成 Discord 附件上傳」的做法，比它的作法複雜且更脆弱：受限於檔案大小上限、消耗自己的頻寬、且下載＋上傳比純粹送出一個連結慢得多。FixTweetBot 從頭到尾都不下載影片，只是把連結網域替換成修復網域（例如 bilibili.com → vxbilibili.com），送出這個修復後的網址純文字，讓 **Discord 自己的爬蟲**原生解析並嵌入可播放的影片——這正是這類「修復網域」服務存在的目的。
-
-**core/link_preview/base.py**
-- `LinkPreview` 新增 `embed_video_link` 欄位：修復網域頁面網址，設計上要當作純文字內容送出（不加 `<>` 角括號），讓 Discord 原生嵌入播放。與 `video_url`（供下載用的直接影片檔案網址，目前渲染路徑未使用）用途不同
-
-**core/link_preview/bilibili.py**
-- 不再呼叫 Bilibili playurl API 下載影片，改為產生 `vxbilibili.com` 風格的修復連結（`bilibili.com`／`b23.tv`／`b22.top` 皆比照辦理，`www.`／`m.` 字首視為裝飾性前綴一併去除）
-
-**core/link_preview/instagram.py／threads.py／twitter.py／tiktok.py**
-- 偵測到 `og:video` 時，改用「本次成功回應的代理網址本身」作為 `embed_video_link`，不再交由 Cog 層下載
-- Instagram 新增 `oginstagram.com`：查證 FixTweetBot 目前實際採用（且是唯一選擇）的 Instagram 修復網域正是這個，可信度較高
-
-**cogs/events/link_preview.py**
-- 移除 `_maybe_build_video_file()`（下載影片邏輯）；`_handle_link()` 改為偵測到 `embed_video_link` 時，將其作為訊息純文字內容與 Embed 一併送出
-- `_build_embed()` 的 `has_video` 判斷依據改為「`embed_video_link` 是否存在」，而非「是否已成功下載影片」，行為不變：有影片時縮圖讓給 Discord 原生嵌入本身，避免兩者呈現幾乎相同的畫面
-
-**core/link_preview/video.py（已移除）**
-- 檔案內容（下載影片位元組、Bilibili playurl API 呼叫）已無任何呼叫端使用，整個檔案移除
-
-**settings.json／core/system/settings.py**
-- 移除已無作用的 `link_preview.video_max_upload_mb`（不再下載影片，沒有上傳大小上限需要限制）
-
----
-
-### 上一輪：全專案健檢、markitdown 整合、新增 /ai 與 /markdown 指令
-
-**core/ai/file_parser/document_parser.py**
-- 改用 [markitdown](https://pypi.org/project/markitdown/) 統一處理 pdf／docx／xlsx／xls／pptx，取代原本各自獨立的 pypdf／python-docx／openpyxl／python-pptx 邏輯
-- 修正既有 bug：`requirements.txt` 原本寫的是 `pypdf2`（安裝後模組名稱是 `PyPDF2`），但程式碼實際 `import pypdf`（完全不同的套件）。實測建立乾淨環境安裝後執行 `import pypdf` 會得到 `ModuleNotFoundError`，代表 PDF 解析一直靜默失敗
-- 額外受益：markitdown 透過 `xls` extra 同時支援舊版 `.xls`，原本一律回絕，現在可以直接解析
-
-**core/ai/models.py**
-- 修正 `EMBED_MODEL`：`text-embedding-004` 已於 2026/1/14 正式棄用，改為官方後繼模型 `gemini-embedding-001`
-
-**core/ai/memory_manager.py**
-- `_embed()` 新增 `task_type` 參數，儲存記憶時使用 `RETRIEVAL_DOCUMENT`、查詢時使用 `RETRIEVAL_QUERY`，提升語意搜尋相關性
-
-**core/ai/tool_registry.py／agent_router.py／context_manager.py**
-- 修正 `_exec_memory()` 呼叫 `memory_manager.search()` 時的參數錯位 bug：原本只傳 3 個位置參數（實際簽名需要 4 個），導致 `channel_id` 被填成問題文字、問題文字被填成全域記憶清單。已補上 `channel_id` 並沿整條呼叫鏈（`context_manager._get_tools()` → `agent_router.execute_tools()` → `tool_registry` 的 executor）修正
-
-**core/ai/ranker.py**
-- 移除 `optimize_context()` 內寫死且無設定可調的 `recent[-6:]` 二次截斷；呼叫端早已用可調整的 `ai.recent_message_limit`（預設 12）限制過筆數
-
-**bot.py**
-- 移除重複定義：`setup_hook()`／`on_ready()`／`sync_slash()`／`refresh_presence()`／`close()` 先前在 `FireflyBot` 類別內各自被完整定義了兩次（內容逐字相同），推測是先前編輯時重複貼上造成。Python 類別本體中同名方法第二次定義會靜默覆蓋第一次，因此第一份是永遠不會執行的死程式碼
-
-**cogs/events/link_preview.py**
-- 修正「影片與縮圖重複顯示」：`_build_embed()` 原本不論是否已成功下載影片附件，一律固定放縮圖，導致同一則訊息同時出現「Embed 裡的靜態縮圖」與「下方可播放的完整影片」。改為有影片附件時，縮圖讓給影片本身、Embed 只留文字資訊
-
-**core/link_preview/fallback.py**
-- 新增「近期失敗網域短期冷卻」機制：失敗過的候選網域會在 `link_preview.dead_host_cooldown_seconds`（預設 300 秒）內被優先跳過，不用每次都重新等 `request_timeout_seconds` 逾時；若全部候選都在冷卻中，仍會照樣全部嘗試一輪，不會讓功能整個停擺
-
-**core/link_preview/instagram.py／threads.py／twitter.py／tiktok.py**
-- 修正候選網域：`www.fixthreads.net` 對應的原始專案已由作者封存下線；`www.vxthreads.net` 誤加了官方沒有的 `www` 字首（官方實際部署在 `vxthreads.net`），這正是 log 中兩個候選網域同時失敗的原因；新增 `viewthreads.com`（Threads）與 `instagramez.com`（Instagram）增加獨立於既有代理服務的備援
-- 新增「候選網域全部失敗時，最後嘗試原始網址本身」的統一備援
-
-**settings.json／core/system/settings.py**
-- 同步上述候選網域修正，新增 `link_preview.dead_host_cooldown_seconds`
-- 補齊 `music.favorites_per_page`／`favorites_load_all_limit`／`voice_channel.jtc_channel_id`／`category_id` 到 `_DEFAULTS`：這幾個設定原本只存在於呼叫端 `get_int()` 的行內預設值，能正常運作但沒有集中登記，`$settings show` 完全看不到
-
-**cogs/ai/chat.py**
-- 修正 `parse_prompt()` 的 docstring：內容裡混入了一行貼錯位置的 `from __future__ import annotations`
-- 附件處理與並發鎖／冷卻邏輯抽到共用模組 `core/ai/attachment_utils.py`、`core/ai/request_guard.py`，供新增的 `/ai` 指令共用，避免重複程式碼與節流狀態不一致
-
-**core/ai/attachment_utils.py（新增）**
-- 從 `cogs/ai/chat.py` 抽出附件處理邏輯（原本是無狀態的實例方法），供 `@提及對話` 與 `/ai` 共用
-
-**core/ai/request_guard.py（新增）**
-- 從 `cogs/ai/chat.py` 抽出每位使用者的並發鎖與冷卻邏輯，改為模組層級共用狀態，避免使用者交替使用 `@提及` 與 `/ai` 繞過冷卻限制
-
-**cogs/ai/ai_command.py（新增）**
-- 新增 `/ai` slash 指令，可在伺服器頻道與私訊（單人聊天）使用（`allowed_contexts(guilds=True, dms=True, private_channels=True)`），與 `@提及對話` 共用附件處理與節流狀態
-
-**cogs/utility/markdown_convert.py（新增）**
-- 新增 `/markdown` 指令，上傳文件後直接呼叫 markitdown 轉換成完整 `.md` 檔案回傳（不經過會截斷內容的 AI 對話流程）
-
-**core/logging/log.py／discord_error_handler.py**
-- 修正檔頭路徑：原本寫成 `bot/core/logging/...`，但專案根目錄下沒有 `bot/` 這層資料夾
-
-**cogs/ticket/ticket.py**
-- 移除「關閉工單」「建立工單」按鈕上的 emoji，改為純文字標籤
-
-**cogs/utility/general.py**
-- 清除 `/hi` 問候語裡殘留的顏文字（先前一次移除沒有清乾淨）
-
-**tests/test_abuse_guard.py**
-- 修正 monkeypatch 目標：原本設定已不存在的模組常數（`abuse_guard.py` 早已改為透過 `get_int()` 即時讀取 `settings.json`），改為攔截 `get_int` 本身
-
-**tests/test_tool_registry.py**
-- 修正函式名稱與參數數量：原本 import 不存在的 `_memory_trigger`（實際是 `_trigger_memory`），且測試字串長度不符合實際邏輯的判斷區間
-
-**tests/test_link_preview_fallback.py（新增）**
-- 新增 4 項測試涵蓋 `fallback.py` 的冷卻機制（失敗進冷卻、冷卻中跳過、全部冷卻仍照樣嘗試、空清單不噴錯）
-
----
-
-### 新增項目
-
-**core/link_preview/**（新增，含 base.py / detector.py / flags.py / http.py / og_meta.py / article.py / summary_trigger.py / bilibili.py / instagram.py / threads.py / pinterest.py / registry.py / summarizer.py / video.py）
-- 新增連結預覽核心邏輯：偵測 Bilibili 短連結／Instagram／Threads／Pinterest 連結，擷取標題、簡介、縮圖、影片網址與統計數據，並透過 Gemma 生成長文摘要（相較 Gemini 系列成本較低）
-- 新增 Pinterest 擷取器（含 `pin.it` 短連結），沿用既有的 `og:*` 標籤解析邏輯
-- 新增關鍵字觸發的通用網頁摘要（`article.py` + `summary_trigger.py`）：訊息中出現「摘要」關鍵字並緊接網址時，抓取任意網址的網頁純文字並用 Gemma 摘要，不限定於前述四個平台；爬取失敗時明確回覆無法擷取，與被動預覽的自動觸發邏輯完全獨立
-- Bilibili 擷取器併入防 `412` 的 `Referer` / `Origin` 標頭修正（源自使用者提供的參考實作），並新增時長欄位解析
-- 平台判斷、擷取邏輯與摘要邏輯皆與 Discord 物件解耦，新增平台只需新增一個擷取器並在 `registry.py` 註冊
-
-**cogs/events/link_preview.py**（新增）
-- 監聽伺服器訊息，涵蓋被動預覽（Bilibili／Instagram／Threads／Pinterest，貼連結即觸發）與關鍵字摘要（「摘要」+ 任意網址，需明確關鍵字）兩套獨立流程，可能同時觸發互不影響
-- 被動預覽回覆風格統一的 Embed（比照「縮圖修復」類第三方 Bot 的呈現方式：作者列／來源列／統計數據列／標題／縮圖或影片），內文超長時自動截斷，避免超過 Discord Embed 長度上限
-- 影片會嘗試下載並以附件重新上傳，超過大小上限則自動退回純縮圖呈現
-- 具備「管理訊息」權限時，會嘗試抑制原訊息的低品質原生 Embed
-- 內建行程內快取，避免同一連結短時間內重複發送外部請求
-
-**core/ai/models.py**（新增）
-- 集中定義 Gemini / Gemma 模型名稱常數，作為模型名稱與用途的唯一來源
-- 新增 `MULTIMODAL_MODEL`，圖片附件不再依賴散落的硬編碼模型名稱
-- 連結預覽的兩套摘要功能（被動預覽簡介摘要、關鍵字網頁摘要）皆直接複用 `MODELS["gemma"]`
-
-**settings.json**
-- 正式合併 `link_preview.*` 系列設定至實際專案設定檔（enabled / max_embeds_per_message / cache_size / request_timeout_seconds / embed_description_max_chars / attach_video / video_max_upload_mb / bilibili_fetch_video / summary_trigger_min_chars / summary_max_chars / summary_input_max_chars / summary_keyword / summary_fetch_max_chars / summary_fail_message）
-
-### 修正項目
-
-**bot.py**
-- 新增 `CustomCommandTree`：slash 指令的全域錯誤處理器，正確回應 `MissingPermissions`、`CheckFailure`、`CommandOnCooldown` 等例外，取代原本使用者只看到「互動未能回應」的行為
-- 新增 `on_command_error`：prefix 指令的全域錯誤處理器，`CommandNotFound` 靜默忽略，其餘例外回覆可讀訊息
-
-**cogs/utility/general.py — /help**
-- 修正：embed fields 超過 Discord 25 個上限（共 43 個指令）導致 400 error 50035
-- 新增 `HelpView` 分頁瀏覽器，每頁最多 20 個指令
-
-**cogs/minecraft/mc_commands.py — /mc pearl**
-- 修正：10 筆計算結果（約 1224 字）超過 Discord embed field value 1024 字元上限
-- 新增 `_split_results_to_fields()`：依實際字元數動態切分為多個 field
-
-**cogs/moderation/mod.py — /warn**
-- 修正：對 Bot 帳號執行 /warn 時觸發 `AttributeError: 'ClientUser' object has no attribute 'create_dm'`
-- `_can_moderate()` 新增 `target.bot` 前置檢查
-- DM 通知新增 `not member.bot` 守衛及 `AttributeError` 捕捉
-
-**cogs/system/owner.py — /reply /talk**
-- 修復：/reply 和 /talk 在重構過程中遺失，已重新整合
-- /talk 錯誤訊息改用 `friendly_http_error()`，50007 等錯誤碼顯示可讀說明
-
-**cogs/events/message.py**
-- 修正：Owner 解析原本使用 `application_info().owner`，Team 擁有的應用程式會解析到錯誤對象，導致 DM 轉發靜默失敗
-- 新增 `last_dm_user_id` property：改為獨立的 `_recent_senders` 追蹤（與轉發是否成功脫鉤），/reply 即使轉發失敗仍能找到目標
-- `on_message` 加上外層例外保護，避免未攔截例外被 discord.py 預設 `on_error` 印到 stderr、繞過專案自己的 logging 系統，導致「功能靜默失效、log 也看不到」
-
-**cogs/talk/say.py / embed.py / typing_indicator.py / webhook.py**
-- 修正：`@app_commands.checks.has_permissions` 改為 `@app_commands.default_permissions`
-- 原本缺少 tree error handler 時，使用者無權限會看到「互動未能回應」而非說明訊息
-
-**cogs/roles/role_management.py**
-- 修正：`_build_panel_embed` 單一 field 在多個身份組時超過 1024 字元
-- 新增 `_split_role_lines_to_fields()` 動態切分
-- label 參數加上 80 字元上限（Discord 按鈕限制）
-- 例外捕捉範圍擴展至 `discord.HTTPException`，涵蓋表情符號格式錯誤等情況
-
-**cogs/system/load.py — $bot_reload**
-- 修正：大量模組同時失敗時，組合錯誤訊息可能超過 Discord 2000 字元上限
-- 新增 `_send_chunked()` 分段發送，單一例外字串截斷至 200 字元
-
-**cogs/guild/guild_settings.py — /server reset**
-- 修正：原本直接在 Cog 內執行原始 SQL，繞過 Repository 層
-- 改呼叫 `guild_repo.reset_settings()`，SQL 集中於資料層維護
-
-**utils/owner_resolver.py**（新增）
-- 集中式 Bot Owner ID 解析，正確處理 Team 擁有的應用程式
-
-**utils/discord_errors.py**（新增）
-- Discord 錯誤代碼（50007 等）轉換為繁體中文說明
-
-**utils/checks.py**
-- `owner_only()` 與 `slash_owner_only()` 改為委派 `bot.is_owner()`，正確處理 Team 應用程式
-
-**cogs/utility/favorites.py — /fav**
-- 新增 `/fav add <query>`：直接提供網址或關鍵字加入收藏，不再要求「必須正在播放中」
-- 新增 `/fav menu`：互動選單，整合取得清單、加入、載入單曲、載入全部、刪除
-- 新增「載入全部收藏」功能，批次上限由 `settings.json` 控制
-
-**database/repository/guild_repository.py**
-- 新增 `reset_settings()` 函式，供 Cog 層呼叫取代直接 SQL 操作
-
-**settings.json**
-- 新增 `music.favorites_per_page`（預設 10）
-- 新增 `music.favorites_load_all_limit`（預設 50）
-- 新增 `dm.recent_senders_limit`（預設 200）
-
----
-
-### 本輪：連結預覽新增平台、影片內嵌、多候選網域容錯
-
-**core/link_preview/video.py — Bilibili 內嵌播放**
-- 修正：`link_preview.bilibili_fetch_video` 原本預設 `false`，導致 Bilibili 預覽長期只顯示縮圖，「內嵌播放影片」功能形同虛設，預設值改為 `true`
-- 新增下載後的 Content-Type 驗證：代理服務異常時可能回傳 HTML 錯誤頁而非真正影片內容，原本會被誤當成影片直接上傳給 Discord，導致附件完全無法播放；現在下載完成後檢查回應標頭確認是 `video/*` 格式，不是則視為失敗並優雅退回純縮圖模式
-- `download_if_within_limit()` 回傳型別由單純緩衝區改為 `(緩衝區, 副檔名)`：不同平台回傳的影片實際容器格式不一定是 mp4，原本統一寫死 `.mp4` 副檔名，可能導致 Discord 無法正確識別 webm／mov 等格式的內嵌播放器；現在依實際偵測到的 Content-Type 決定副檔名
-
-**core/link_preview/fallback.py**（新增）
-- 統一「多候選代理網域、失敗自動改用下一個」的請求邏輯：`ddinstagram.com` 曾發生 DNS 完全無法解析、`fixthreads.net` 曾回傳 502 Bad Gateway，這類社群維運的反代服務生命週期不穩定是常態；原本每個平台寫死單一網域，該服務一失效整個平台預覽就完全停擺，現在改為候選清單依序嘗試，任一候選能連上即可
-
-**core/link_preview/instagram.py／threads.py**
-- 改用 `fallback.try_hosts()`，候選網域清單由 `settings.json` 的 `instagram_proxy_hosts`／`threads_proxy_hosts` 控制，之後若某代理服務又停止運作，只需調整設定即可，不需修改程式碼
-- 新增讀取 `og:video` 標籤，支援內嵌播放代理服務提供的影片
-
-**core/link_preview/twitter.py／tiktok.py**（新增）
-- 新增 Twitter/X、TikTok 兩個平台的連結預覽，Discord 對這兩個平台的原生 Embed 支援長期不佳，作法與 Instagram／Threads 一致：多候選代理網域、`og:*` 標籤解析、支援內嵌影片
-
-**core/link_preview/detector.py**
-- 修正網域比對邏輯的誤判風險：原本用「子字串是否出現在整個網址中」判斷平台，對極短網域（如新增的 `x.com`）容易誤判，例如 `xbox.com` 本身就包含連續子字串 `x.com`，會被誤判為 Twitter/X 連結。改為解析網址真正的 hostname，要求完全等於候選網域或以 `.候選網域` 結尾，不再對整個網址字串做子字串搜尋
-- 新增 twitter、tiktok 平台規則
-
-**core/link_preview/bilibili.py**
-- `_resolve_redirect()` 的短網址判斷比照 detector.py 改用 hostname 邊界比對，不再用子字串搜尋，風格與其餘平台一致
-
-**core/link_preview/pinterest.py**
-- 新增讀取 `og:video` 標籤，支援影片類型的 Pin 內嵌播放
-
-**cogs/events/link_preview.py**
-- `_build_embed()` 新增「查看原始貼文」超連結行：原本只有標題可以點擊，內文中沒有任何明確的連結文字，容易被使用者忽略；現在固定在內文末端加上一行 Markdown 超連結
-- 支援平台清單擴充為六個（新增 Twitter/X、TikTok），並在文件中說明 YouTube 刻意不處理的原因（Discord 原生官方 oEmbed 支援已完整，重複顯示是更差的體驗）
-- 配合 `video.py` 的新回傳型別，`_maybe_build_video_file()` 不再寫死 `.mp4` 附件檔名
-
-**core/system/settings.py**
-- 新增 `get_list()`：型別安全的清單設定讀取，值不是 list 時回退預設值並記錄警告，避免誤設定導致後續迴圈出現非預期行為
-- `link_preview.bilibili_fetch_video` 預設值改為 `true`
-- 新增 `link_preview.instagram_proxy_hosts`／`threads_proxy_hosts`／`twitter_proxy_hosts`／`tiktok_proxy_hosts` 四組候選網域預設值
-
-**settings.json**
-- 同步新增上述四組候選網域清單
-- `bilibili_fetch_video` 改為 `true`
+版本變更請以 Git commit 與 release notes 為準，不在本文件重複維護流水帳式 Changelog。

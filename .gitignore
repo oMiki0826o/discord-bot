@@ -23,6 +23,9 @@ database/ai/*.db
 database/prompts/active.txt
 output.txt
 
+# ── AI 協作暫存 ──────────────────────
+紀錄.md
+
 # ── 作業系統 ──────────────────────
 .DS_Store
 Thumbs.db

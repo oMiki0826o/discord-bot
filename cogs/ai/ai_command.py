@@ -16,6 +16,8 @@ Modification():
   的作法，而非隨意的新設計）。
 - allowed_contexts(guilds=True, dms=True, private_channels=True)：
   與 say.py 的既有慣例一致，讓指令同時可在伺服器與各種私訊情境使用。
+- 附件處理與 AI 產生回覆期間會顯示 Discord typing 指示器，
+  並在完成或發生例外時自動停止。
 - 新增 model 選填參數（Discord Choice：flash／gemini／gemma），讓
   使用者可透過下拉選單明確指定本次對話要用的模型，不必再依賴 prompt
   文字內嵌關鍵字（如「用flash」）才能間接觸發覆寫；選項清單直接沿用
@@ -39,6 +41,7 @@ from __future__ import annotations
 
 import io
 import logging
+from time import perf_counter
 
 import discord
 from discord import app_commands
@@ -48,6 +51,7 @@ from core.ai.agent_router import MODEL_CHOICES
 from core.ai.attachment_utils import process_attachments
 from core.ai.core import generate
 from core.ai.request_guard import check_cooldown, cooldown_message, lock_for
+from core.ai.streaming_response import StreamingResponse
 from core.system.settings import get_int, get_str
 
 logger = logging.getLogger("bot.ai.ai_command")
@@ -57,9 +61,9 @@ logger = logging.getLogger("bot.ai.ai_command")
 # 模組載入時檢查，避免兩處清單日後修改時彼此脫節而不自知。
 
 _MODEL_CHOICE_LABELS: dict[str, str] = {
-    "flash":  "2.5Flash",
-    "gemini": "3.1Flash lite",
-    "gemma":  "Gemma4 31B",
+    "gemini": "Gemini",
+    "flash":  "Flash",
+    "gemma":  "Gemma",
 }
 
 assert _MODEL_CHOICE_LABELS.keys() == MODEL_CHOICES.keys(), (
@@ -118,9 +122,16 @@ class AICommand(commands.Cog):
         # 頻道內其他人也能看到問答內容。
         await interaction.response.defer(thinking=True)
 
-        async with lock:
+        async with lock, interaction.channel.typing():
+            request_started = perf_counter()
             attachments = [a for a in (file1, file2, file3) if a is not None]
             files, image_parts = await process_attachments(attachments)
+            attachment_elapsed = perf_counter() - request_started
+
+            async def send_stream(content: str) -> discord.Message:
+                return await interaction.followup.send(content, wait=True)
+
+            stream = StreamingResponse(send_stream)
 
             try:
                 text = await generate(
@@ -130,8 +141,15 @@ class AICommand(commands.Cog):
                     files          = files,
                     image_parts    = image_parts,
                     model_override = model.value if model is not None else None,
+                    on_chunk       = stream.push,
+                    on_retry       = stream.reset,
                 )
-                await self._send_response(interaction, text)
+                if not await stream.finish(text):
+                    await self._send_response(interaction, text)
+                logger.info(
+                    "[timing] user=%s attachments=%.3fs discord_total=%.3fs",
+                    user_id, attachment_elapsed, perf_counter() - request_started,
+                )
 
             except Exception as e:
                 logger.exception("[ai_command] error user=%s: %s", user_id, e)
@@ -140,7 +158,8 @@ class AICommand(commands.Cog):
                     error_message = template.format(error=type(e).__name__)
                 except (KeyError, ValueError):
                     error_message = f"錯誤：{type(e).__name__}"
-                await interaction.followup.send(error_message)
+                if not await stream.finish(error_message):
+                    await interaction.followup.send(error_message)
 
     # ── 送出回覆 ──────────────────────
 

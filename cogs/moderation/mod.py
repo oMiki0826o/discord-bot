@@ -113,7 +113,10 @@ class Moderation(commands.Cog):
 
     @app_commands.command(name="ban", description="封禁成員")
     @app_commands.describe(member="要封禁的成員", reason="原因", delete_days="刪除幾天內的訊息（0-7）")
+    @app_commands.guild_only()
     @app_commands.default_permissions(ban_members=True)
+    @app_commands.checks.has_permissions(ban_members=True)
+    @app_commands.checks.bot_has_permissions(ban_members=True)
     async def cmd_ban(
         self,
         interaction: discord.Interaction,
@@ -146,7 +149,10 @@ class Moderation(commands.Cog):
 
     @app_commands.command(name="unban", description="解除成員封禁")
     @app_commands.describe(user_id="要解封的使用者 ID")
+    @app_commands.guild_only()
     @app_commands.default_permissions(ban_members=True)
+    @app_commands.checks.has_permissions(ban_members=True)
+    @app_commands.checks.bot_has_permissions(ban_members=True)
     async def cmd_unban(self, interaction: discord.Interaction, user_id: str) -> None:
         try:
             uid  = int(user_id)
@@ -180,7 +186,10 @@ class Moderation(commands.Cog):
 
     @app_commands.command(name="kick", description="踢出成員（可重新加入）")
     @app_commands.describe(member="要踢出的成員", reason="原因")
+    @app_commands.guild_only()
     @app_commands.default_permissions(kick_members=True)
+    @app_commands.checks.has_permissions(kick_members=True)
+    @app_commands.checks.bot_has_permissions(kick_members=True)
     async def cmd_kick(
         self,
         interaction: discord.Interaction,
@@ -212,7 +221,10 @@ class Moderation(commands.Cog):
 
     @app_commands.command(name="mute", description="禁言成員（Discord timeout）")
     @app_commands.describe(member="要禁言的成員", minutes="時長（分鐘）", reason="原因")
+    @app_commands.guild_only()
     @app_commands.default_permissions(moderate_members=True)
+    @app_commands.checks.has_permissions(moderate_members=True)
+    @app_commands.checks.bot_has_permissions(moderate_members=True)
     async def cmd_mute(
         self,
         interaction: discord.Interaction,
@@ -263,8 +275,14 @@ class Moderation(commands.Cog):
     # ── /unmute ──────────────────────
 
     @app_commands.command(name="unmute", description="解除成員禁言")
+    @app_commands.guild_only()
     @app_commands.default_permissions(moderate_members=True)
+    @app_commands.checks.has_permissions(moderate_members=True)
+    @app_commands.checks.bot_has_permissions(moderate_members=True)
     async def cmd_unmute(self, interaction: discord.Interaction, member: discord.Member) -> None:
+        if err := self._can_moderate(interaction, member):
+            await interaction.response.send_message(err, ephemeral=True)
+            return
         try:
             await member.timeout(None)
         except discord.Forbidden:
@@ -286,7 +304,9 @@ class Moderation(commands.Cog):
 
     @app_commands.command(name="warn", description="對成員發出警告")
     @app_commands.describe(member="要警告的成員", reason="原因")
+    @app_commands.guild_only()
     @app_commands.default_permissions(moderate_members=True)
+    @app_commands.checks.has_permissions(moderate_members=True)
     async def cmd_warn(
         self,
         interaction: discord.Interaction,
@@ -334,7 +354,9 @@ class Moderation(commands.Cog):
     # ── /warnings ──────────────────────
 
     @app_commands.command(name="warnings", description="查看成員的警告紀錄")
+    @app_commands.guild_only()
     @app_commands.default_permissions(moderate_members=True)
+    @app_commands.checks.has_permissions(moderate_members=True)
     async def cmd_warnings(self, interaction: discord.Interaction, member: discord.Member) -> None:
         warns = await mod_repo.get_warnings(interaction.guild.id, str(member.id))
         total = await mod_repo.count_warnings(interaction.guild.id, str(member.id))
@@ -359,7 +381,9 @@ class Moderation(commands.Cog):
     # ── /clear_warns ──────────────────────
 
     @app_commands.command(name="clear_warns", description="清除成員所有警告紀錄")
+    @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
     async def cmd_clear_warns(self, interaction: discord.Interaction, member: discord.Member) -> None:
         deleted = await mod_repo.clear_warnings(interaction.guild.id, str(member.id))
         await interaction.response.send_message(
@@ -371,7 +395,10 @@ class Moderation(commands.Cog):
 
     @app_commands.command(name="purge", description="批量刪除頻道訊息（最多 100 則）")
     @app_commands.describe(amount="要刪除的數量（1-100）")
+    @app_commands.guild_only()
     @app_commands.default_permissions(manage_messages=True)
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.checks.bot_has_permissions(manage_messages=True, read_message_history=True)
     async def cmd_purge(
         self,
         interaction: discord.Interaction,
@@ -389,7 +416,9 @@ class Moderation(commands.Cog):
     # ── /modlog ──────────────────────
 
     @app_commands.command(name="modlog", description="查看最近 20 筆管理動作紀錄")
+    @app_commands.guild_only()
     @app_commands.default_permissions(moderate_members=True)
+    @app_commands.checks.has_permissions(moderate_members=True)
     async def cmd_modlog(self, interaction: discord.Interaction) -> None:
         logs  = await mod_repo.get_mod_log(interaction.guild.id, limit=20)
         embed = discord.Embed(

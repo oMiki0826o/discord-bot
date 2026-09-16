@@ -21,6 +21,8 @@ Description():
 
 from __future__ import annotations
 
+import importlib
+
 from discord.ext import commands
 
 from core.logging.log import LogManager
@@ -37,6 +39,77 @@ _ACTION_LABELS: dict[str, str] = {
 
 # Discord 訊息內容上限為 2000；留緩衝避免邊界誤差
 _MESSAGE_LIMIT: int = 1900
+
+
+def _music_core_restart_reasons() -> list[str]:
+    """檢查目前 process 中的音樂核心 API 是否與新 Cog 相容。
+
+    Cog 可以透過 discord.py 熱重載，但已匯入的 core 模組仍會留在
+    sys.modules。若 Cog 已改用新核心 API，重載後會形成新舊版本混用，
+    此時必須完整重啟 Bot。
+    """
+    reasons: list[str] = []
+
+    requirements = {
+        "core.music.url": ("is_youtube_url",),
+        "core.music.queue": (
+            "QueueFullError",
+            "MusicQueue",
+        ),
+        "core.music.views": ("require_player_control",),
+        "core.music.song": ("Song",),
+        "core.music.player": ("GuildPlayer",),
+    }
+
+    modules: dict[str, object] = {}
+    for module_name, attributes in requirements.items():
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:
+            reasons.append(f"{module_name} 無法匯入：{exc}")
+            continue
+
+        modules[module_name] = module
+        for attribute in attributes:
+            if not hasattr(module, attribute):
+                reasons.append(f"{module_name}.{attribute} 尚未載入")
+
+    queue_module = modules.get("core.music.queue")
+    queue_type = getattr(queue_module, "MusicQueue", None)
+    for attribute in ("max_size", "index_of_id", "remove_by_id", "move_by_id"):
+        if queue_type is not None and not hasattr(queue_type, attribute):
+            reasons.append(f"core.music.queue.MusicQueue.{attribute} 尚未載入")
+
+    song_module = modules.get("core.music.song")
+    song_type = getattr(song_module, "Song", None)
+    song_fields = getattr(song_type, "__dataclass_fields__", {})
+    if song_type is not None and "queue_id" not in song_fields:
+        reasons.append("core.music.song.Song.queue_id 尚未載入")
+
+    player_module = modules.get("core.music.player")
+    player_type = getattr(player_module, "GuildPlayer", None)
+    add_playlist = getattr(player_type, "add_playlist", None)
+    code_names = getattr(getattr(add_playlist, "__code__", None), "co_names", ())
+    if player_type is not None and "QueueFullError" not in code_names:
+        reasons.append("core.music.player.GuildPlayer.add_playlist 仍為舊版本")
+
+    return reasons
+
+
+def _core_import_error(exc: BaseException) -> str | None:
+    """從 extension 包裝例外鏈中找出 core 模組的 ImportError。"""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ImportError) and "core." in str(current):
+            return str(current)
+        current = (
+            current.__cause__
+            or current.__context__
+            or getattr(current, "original", None)
+        )
+    return None
 
 
 async def _send_chunked(ctx: commands.Context, text: str) -> None:
@@ -82,6 +155,15 @@ class Load(commands.Cog):
         except commands.ExtensionNotLoaded:
             await ctx.send(f"`{extension}` 尚未載入")
         except Exception as exc:
+            core_error = _core_import_error(exc)
+            if core_error:
+                await ctx.send(
+                    "操作失敗：Cog 需要新版 core API，無法安全熱重載。"
+                    "請完整重啟 Bot 後再試。\n"
+                    f"`{core_error[:300]}`"
+                )
+                logger.warning("核心模組版本不相容，需重啟：%s", module)
+                return
             text = str(exc)
             if len(text) > 300:
                 text = text[:300] + "..."
@@ -118,6 +200,19 @@ class Load(commands.Cog):
     @commands.command(name="bot_reload", hidden=True)
     @commands.is_owner()
     async def reload_all(self, ctx: commands.Context) -> None:
+        restart_reasons = _music_core_restart_reasons()
+        if restart_reasons:
+            detail = "\n".join(f"- {reason}" for reason in restart_reasons)
+            await _send_chunked(
+                ctx,
+                "偵測到執行中的音樂 core 與目前 Cog 版本不一致，"
+                "已取消熱重載以避免新舊物件混用。\n"
+                "請完整重啟 Bot。\n"
+                f"{detail}",
+            )
+            logger.warning("bot_reload 取消：需重啟 | %s", restart_reasons)
+            return
+
         success: list[str] = []
         failed: list[str] = []
 

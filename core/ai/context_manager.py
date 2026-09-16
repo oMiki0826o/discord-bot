@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from core.ai.agent_router import RouteDecision
 from core.ai.file_parser.models import ParsedFile
 from core.ai.memory_manager import search as memory_search
+from core.system.settings import get_int
 from core.ai.user_context import (
     extend_state,
     get_global_memories,
@@ -74,6 +75,7 @@ async def build(
     route:              RouteDecision,
     cached_search:      str | None = None,
     files:              list[ParsedFile] | None = None,
+    user_info:          dict | None = None,
 ) -> ContextBundle:
     """
     組裝 ContextBundle：
@@ -84,20 +86,25 @@ async def build(
     - files：file_parser 已解析完成的附件結果，由 chat.py 傳入，
       本函式只負責原樣放入 ContextBundle，不重新觸發解析
     """
-    user_info   = await get_user_info(user_id, username)
-    global_mems = await get_global_memories()
+    user_task = (
+        asyncio.create_task(get_user_info(user_id, username))
+        if user_info is None else None
+    )
+    global_task = asyncio.create_task(get_global_memories())
+    tool_task = asyncio.create_task(_get_tools(route, user_id, channel_id, clean))
+    extend_task = asyncio.create_task(extend_state(user_id))
+    state_task = asyncio.create_task(state_to_prompt(user_id))
+    profile_task = asyncio.create_task(profile_to_prompt(user_id))
+
+    global_mems = await global_task
 
     # ── 並行取得記憶與 tool 結果 ──────────────────────
-    mem_task  = asyncio.create_task(memory_search(user_id, channel_id, clean, global_mems))
-    tool_task = asyncio.create_task(_get_tools(route, user_id, channel_id, clean))
-
-    await extend_state(user_id)   # 滑動 TTL
-
-    state_sec   = await state_to_prompt(user_id)
-    profile_sec = await profile_to_prompt(user_id)
-
-    mem_bundle  = await mem_task
-    tool_secs   = await tool_task
+    mem_task = asyncio.create_task(memory_search(user_id, channel_id, clean, global_mems))
+    mem_bundle, tool_secs, _, state_sec, profile_sec = await asyncio.gather(
+        mem_task, tool_task, extend_task, state_task, profile_task,
+    )
+    if user_task is not None:
+        user_info = await user_task
 
     # ── 快取搜尋結果注入為最優先 tool_section ──────────────────────
     if cached_search:
@@ -125,6 +132,7 @@ async def build(
         profile_section = profile_sec,
         files           = files or [],
         security_notice = injection_detected,
+        max_length      = max(1_000, get_int("ai.prompt_max_chars", 8_000)),
     )
 
 # ── 內部工具 ──────────────────────

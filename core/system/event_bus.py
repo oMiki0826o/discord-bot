@@ -38,6 +38,46 @@ _background_tasks: set[asyncio.Task] = set()
 
 # ── 公開 API ──────────────────────
 
+def create_background_task(
+    coroutine: Coroutine,
+    *,
+    name: str | None = None,
+) -> asyncio.Task:
+    """建立並追蹤背景 task，避免執行中被回收。"""
+    task = asyncio.create_task(coroutine, name=name)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_task_done)
+    return task
+
+
+def _background_task_done(task: asyncio.Task) -> None:
+    """移除已完成 task，並取出例外避免靜默遺失。"""
+    _background_tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        error = task.exception()
+    except (asyncio.CancelledError, Exception):
+        return
+    if error is not None:
+        logger.error("[background_task] name=%s error=%s", task.get_name(), error)
+
+
+async def drain(timeout: float = 5.0) -> None:
+    """關機前等待背景工作；逾時後取消剩餘 task。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, timeout)
+    while _background_tasks:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            tasks = tuple(_background_tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            return
+        await asyncio.wait(tuple(_background_tasks), timeout=remaining)
+
+
 def on(event: str, handler: Callable[..., Coroutine]) -> None:
     """
     注冊事件 handler。
@@ -63,13 +103,10 @@ async def emit(event: str, **kwargs: Any) -> None:
         return
 
     for handler in handlers:
-        task = asyncio.create_task(
+        create_background_task(
             _safe_call(handler, event, **kwargs),
             name=f"event_{event}_{handler.__name__}",
         )
-        # 加入追蹤集合，避免 Task 在執行中被 GC 回收；完成後自動移除
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
 
 
 async def _safe_call(

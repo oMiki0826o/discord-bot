@@ -6,7 +6,7 @@ cogs/system/owner.py
 - Owner 專用 Slash 指令（/reply、/talk）
 - $game [type] <文字>：即時更改 Bot 狀態，並持久化至 settings.json
 - $slash：同步 Slash Commands 至全域
-- $slash_guild：即時同步 Slash Commands 至當前伺服器（測試用）
+- $slash_guild：清除當前伺服器的舊 Slash Commands，避免與全域版重複
 - /reply：回覆最近私訊的使用者或指定 user ID
 - /talk：讓機器人私訊指定使用者
 
@@ -22,6 +22,8 @@ Modification():
 - /reply 透過 Messenger.last_dm_user_id 取得預設目標，
   該屬性已與「轉發是否成功」脫鉤（見 cogs/events/message.py），
   因此即使轉發給 Owner 失敗，/reply 仍可正確找到最近私訊者。
+- 將 Owner only `$help` 改為 Embed 類別選單；依功能模組分頁顯示目前
+  載入的 prefix 指令，並與 `/help` 共用互動元件。
 
 """
 
@@ -34,6 +36,7 @@ from discord.ext import commands
 from core.logging.log     import LogManager
 from core.system.settings import get, write_value
 from utils.discord_errors import friendly_http_error
+from utils.help_menu      import HelpEntry, HelpMenuView, HelpPage, build_help_pages
 
 logger = LogManager().get_logger("cogs.system.owner")
 
@@ -47,6 +50,86 @@ _ACTIVITY_TYPE_MAP: dict[str, discord.ActivityType] = {
     "watching":  discord.ActivityType.watching,
     "competing": discord.ActivityType.competing,
 }
+
+_CATEGORY_NAMES: dict[str, str] = {
+    "ai": "AI 管理",
+    "events": "事件與狀態",
+    "music": "音樂管理",
+    "system": "系統管理",
+}
+
+
+# ── Prefix Help 產生工具 ──────────────────────
+
+def _command_signature(command: commands.Command, prefix: str) -> str:
+    """建立 prefix 指令顯示用語法，並附上 alias 資訊。"""
+    signature = f"{prefix}{command.qualified_name}"
+    if command.signature:
+        signature += f" {command.signature}"
+
+    if command.aliases:
+        aliases = " / ".join(f"{prefix}{alias}" for alias in command.aliases)
+        signature += f"\n別名：{aliases}"
+
+    return signature
+
+
+async def _is_visible_to_owner(command: commands.Command, ctx: commands.Context) -> bool:
+    """確認指令能否由目前 owner 執行；無法判斷時保守隱藏。"""
+    try:
+        return await command.can_run(ctx)
+    except commands.CommandError:
+        return False
+
+
+def _command_category(command: commands.Command) -> str:
+    """依 Cog 模組路徑取得 prefix 指令功能類別。"""
+    if command.cog is None:
+        return "未分類"
+
+    module_parts = command.cog.__class__.__module__.split(".")
+    if len(module_parts) >= 2 and module_parts[0] == "cogs":
+        return _CATEGORY_NAMES.get(module_parts[1], module_parts[1].title())
+    return command.cog.qualified_name
+
+
+def _append_help_entry(
+    groups: dict[str, list[HelpEntry]],
+    command: commands.Command,
+    prefix: str,
+) -> None:
+    """把單一 prefix 指令加入對應 Cog 分組。"""
+    category = _command_category(command)
+    groups.setdefault(category, []).append(
+        HelpEntry(
+            name=_command_signature(command, prefix),
+            description=command.short_doc or "無說明",
+        )
+    )
+
+
+async def _build_prefix_help_pages(ctx: commands.Context) -> list[HelpPage]:
+    """動態產生依功能分類的 prefix command Help 頁面。"""
+    prefix = str(ctx.prefix or "$")
+    groups: dict[str, list[HelpEntry]] = {}
+    seen: set[commands.Command] = set()
+
+    for command in sorted(ctx.bot.walk_commands(), key=lambda c: c.qualified_name):
+        if command in seen:
+            continue
+        seen.add(command)
+
+        if not await _is_visible_to_owner(command, ctx):
+            continue
+
+        _append_help_entry(groups, command, prefix)
+
+    return build_help_pages(
+        groups,
+        title="Prefix 指令說明",
+        intro=f"請使用下方選單切換 `{prefix}` 指令類別。此清單僅限 Bot Owner 查閱。",
+        footer=get("embed_footer.default", "Firefly Bot"),
+    )
 
 
 # ── Slash 指令 Owner 驗證 ──────────────────────
@@ -84,6 +167,16 @@ async def _reply_error(interaction: discord.Interaction, message: str) -> None:
 class Owner(commands.Cog, name="Owner"):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+
+    # ── $help ──────────────────────
+
+    @commands.command(name="help", hidden=True)
+    @commands.is_owner()
+    async def cmd_help(self, ctx: commands.Context) -> None:
+        """$help — 以 Embed 類別選單顯示目前載入的 prefix 指令"""
+        pages = await _build_prefix_help_pages(ctx)
+        view = HelpMenuView(pages, ctx.author.id)
+        view.message = await ctx.send(embed=pages[0].embed, view=view)
 
     # ── $game ──────────────────────
 
@@ -157,17 +250,20 @@ class Owner(commands.Cog, name="Owner"):
     @commands.command(name="slash_guild", hidden=True)
     @commands.is_owner()
     async def slash_guild(self, ctx: commands.Context) -> None:
-        """$slash_guild — 即時同步 Slash Commands 至當前伺服器（測試用）"""
+        """$slash_guild — 清除當前伺服器的重複 Slash Commands"""
         guild = ctx.guild
         if not guild:
             await ctx.send("此指令僅限在伺服器中使用")
             return
-        self.bot.tree.copy_global_to(guild=guild)
-        synced = await self.bot.tree.sync(guild=guild)
-        await ctx.send(f"已即時同步 {len(synced)} 個 Slash Commands 至 **{guild.name}**")
+        self.bot.tree.clear_commands(guild=guild)
+        await self.bot.tree.sync(guild=guild)
+        await ctx.send(
+            f"已清除 **{guild.name}** 的伺服器專用 Slash Commands，"
+            "現在只保留全域版。Discord 選單可能需要數秒重新整理。"
+        )
         logger.info(
-            "[owner.$slash_guild] 同步 %d 個指令至 %s by %s",
-            len(synced), guild.name, ctx.author,
+            "[owner.$slash_guild] 清除伺服器專用指令 guild=%s by=%s",
+            guild.name, ctx.author,
         )
 
     # ── /reply ──────────────────────

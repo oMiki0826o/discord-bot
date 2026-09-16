@@ -25,6 +25,10 @@ Modification():
   MissingRequiredArgument 顯示用法提示；NotOwner / MissingPermissions
   顯示權限不足訊息；其餘例外重新拋出，交由 DiscordErrorHandler 處理
   並通知 Owner。
+- 關閉 discord.py 預設 help_command，讓 cogs/system/owner.py 的 Owner only
+  Embed `$help` 可以接管同名 prefix 指令。
+- Slash CommandNotFound 改為 info log 並提示使用者重新整理指令清單，避免
+  已移除指令（例如 /fav）在 Discord 快取尚未刷新時被記為未知 ERROR。
 
 本檔是專案的 Discord Bot 入口。FireflyBot 負責建立 intents、載入擴充
 模組、同步 Slash Commands、套用 presence，並管理啟動與關閉生命週期；
@@ -45,6 +49,7 @@ from discord.ext import commands
 
 import config
 from core.logging.log             import LogManager
+from core.system import event_bus
 from core.system.extension_loader import ExtensionLoader
 from core.system.startup_registry import run_warmup
 from core.system.settings         import get
@@ -117,6 +122,7 @@ class CustomCommandTree(app_commands.CommandTree):
     轉換為使用者可讀的中文錯誤訊息，而非讓互動無聲失敗。
 
     處理的例外類型：
+    - CommandNotFound：Discord 客戶端仍送出已移除或尚未同步的舊指令
     - MissingPermissions：使用者缺少執行所需的 Discord 權限
     - BotMissingPermissions：Bot 本身缺少必要的 Discord 權限
     - CommandOnCooldown：指令冷卻中，告知剩餘秒數
@@ -130,6 +136,15 @@ class CustomCommandTree(app_commands.CommandTree):
         interaction: discord.Interaction,
         error:       app_commands.AppCommandError,
     ) -> None:
+        # ── 指令不存在：通常是 Discord 快取仍保留舊 Slash 指令 ──────────────────────
+        if isinstance(error, app_commands.CommandNotFound):
+            logger.info("Slash 指令不存在或尚未同步：%s", error)
+            await _send_interaction_error(
+                interaction,
+                "這個 Slash 指令已不存在或尚未同步完成，請重新開啟指令選單後再試。",
+            )
+            return
+
         # ── 缺少使用者權限 ──────────────────────
         if isinstance(error, app_commands.MissingPermissions):
             perms = "、".join(error.missing_permissions)
@@ -209,11 +224,13 @@ class FireflyBot(commands.Bot):
             owner_id           = config.OWNER_ID or None,
             strip_after_prefix = True,
             tree_cls           = CustomCommandTree,
+            help_command       = None,
         )
 
         self.log_manager                 = log_manager
         self.ready_event: asyncio.Event  = asyncio.Event()
         self._startup_time: float        = time.monotonic()
+        self._ready_logged: bool         = False
         self._loader                     = ExtensionLoader(self)
 
     # ── setup_hook ──────────────────────
@@ -257,8 +274,19 @@ class FireflyBot(commands.Bot):
     async def on_ready(self) -> None:
         assert self.user is not None
 
-        startup_elapsed = time.monotonic() - self._startup_time
         user_count      = sum(g.member_count or 0 for g in self.guilds)
+
+        if self._ready_logged:
+            logger.info(
+                "Bot 重新連線完成 | 帳號=%s 伺服器=%d 使用者=%d",
+                self.user,
+                len(self.guilds),
+                user_count,
+            )
+            return
+
+        self._ready_logged = True
+        startup_elapsed = time.monotonic() - self._startup_time
 
         # ── 啟動摘要 ──────────────────────
         separator = "=" * 48
@@ -355,9 +383,9 @@ class FireflyBot(commands.Bot):
     # ── sync_slash（供管理指令手動呼叫） ──────────────────────
 
     async def sync_slash(self, guild: discord.Guild | None = None) -> list:
-        """手動同步 Slash Commands，供 $slash / $slash_guild 指令呼叫。"""
+        """同步全域 Slash Commands，或清除伺服器專用的重複指令。"""
         if guild:
-            self.tree.copy_global_to(guild=guild)
+            self.tree.clear_commands(guild=guild)
             synced = await self.tree.sync(guild=guild)
         else:
             synced = await self.tree.sync()
@@ -376,6 +404,7 @@ class FireflyBot(commands.Bot):
 
     async def close(self) -> None:
         logger.info("Bot 關閉中...")
+        await event_bus.drain(timeout=5.0)
 
         # ── 發送關機報告（限時 10 秒，避免卡死） ──────────────────────
         log_mgr = getattr(self, "log_manager", None)

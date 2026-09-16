@@ -7,6 +7,8 @@ Modification():
   以及 core.link_preview.article.fetch_text() 的重定向逐跳驗證。
   比照全專案既有慣例，不依賴 pytest-asyncio，在一般同步測試函式
   內用 asyncio.run() 包裝要測試的 async 邏輯。
+- 公開網域測試 mock socket.getaddrinfo()，避免依賴測試環境 DNS
+  或沙盒網路狀態。
 
 測試 core.link_preview.url_guard.is_safe_url()：
 - 私有網段、迴路、連結本地（含雲端 metadata 端點）、非 http(s)
@@ -33,6 +35,15 @@ from core.link_preview.url_guard import is_safe_url
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _fake_public_getaddrinfo(hostname, *_args, **_kwargs):
+    """將測試用公開網域解析到文件保留的公開 IPv4 位址。"""
+    if hostname in {"example.com", "www.example.com"}:
+        return [(None, None, None, "", ("93.184.216.34", 0))]
+    if hostname == "169.254.169.254":
+        return [(None, None, None, "", ("169.254.169.254", 0))]
+    raise AssertionError(f"unexpected hostname={hostname}")
 
 
 # ── is_safe_url() ──────────────────────
@@ -66,7 +77,11 @@ def test_rejects_non_http_schemes():
 
 
 def test_allows_public_domain():
-    safe, _ = is_safe_url("https://www.example.com/page")
+    with patch(
+        "core.link_preview.url_guard.socket.getaddrinfo",
+        side_effect=_fake_public_getaddrinfo,
+    ):
+        safe, _ = is_safe_url("https://www.example.com/page")
     assert safe is True
 
 
@@ -128,7 +143,13 @@ def test_fetch_text_returns_cleaned_content_for_normal_page():
             body=b"<html><body><p>Hello World test article content.</p></body></html>",
         )
     ])
-    with patch.object(article, "build_client", return_value=fake_client):
+    with (
+        patch.object(article, "build_client", return_value=fake_client),
+        patch(
+            "core.link_preview.url_guard.socket.getaddrinfo",
+            side_effect=_fake_public_getaddrinfo,
+        ),
+    ):
         text = _run(article.fetch_text("https://example.com/", max_chars=1000))
     assert text is not None and "Hello World" in text
 
@@ -141,7 +162,13 @@ def test_fetch_text_follows_safe_redirect():
                              headers={"content-type": "text/html"},
                              body=b"<html><body>Redirected content for testing.</body></html>"),
     ])
-    with patch.object(article, "build_client", return_value=fake_client):
+    with (
+        patch.object(article, "build_client", return_value=fake_client),
+        patch(
+            "core.link_preview.url_guard.socket.getaddrinfo",
+            side_effect=_fake_public_getaddrinfo,
+        ),
+    ):
         text = _run(article.fetch_text("https://example.com/old", max_chars=1000))
     assert text is not None and "Redirected content" in text
 
@@ -158,7 +185,13 @@ def test_fetch_text_blocks_redirect_to_internal_address():
             headers={"location": "http://169.254.169.254/latest/meta-data/"},
         ),
     ])
-    with patch.object(article, "build_client", return_value=fake_client):
+    with (
+        patch.object(article, "build_client", return_value=fake_client),
+        patch(
+            "core.link_preview.url_guard.socket.getaddrinfo",
+            side_effect=_fake_public_getaddrinfo,
+        ),
+    ):
         text = _run(article.fetch_text("https://example.com/evil", max_chars=1000))
     assert text is None
 

@@ -31,6 +31,7 @@ Modification():
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
@@ -66,26 +67,30 @@ async def process_attachments(
     將附件分流為「file_parser 解析結果」與「圖片多模態 Part」。
     單一附件失敗只記錄 log，不影響其他附件或整體對話流程。
     """
-    files:       list[ParsedFile] = []
-    image_parts: list[types.Part] = []
     max_attachments = max(0, get_int("ai.max_attachments", 5))
+    concurrency = max(1, get_int("ai.attachment_concurrency", 3))
+    semaphore = asyncio.Semaphore(concurrency)
 
-    for attachment in attachments[:max_attachments]:
-        ext = Path(attachment.filename).suffix.lower()
-        try:
-            if ext in IMAGE_EXTENSIONS:
-                part = await read_image_part(attachment, ext)
-                if part is not None:
-                    image_parts.append(part)
-            else:
-                parsed = await parse_attachment_file(attachment)
-                if parsed is not None:
-                    files.append(parsed)
-        except Exception as e:
-            logger.warning(
-                "[process_attachments] 附件處理失敗 filename=%s: %s",
-                attachment.filename, e,
-            )
+    async def process_one(attachment: discord.Attachment):
+        async with semaphore:
+            ext = Path(attachment.filename).suffix.lower()
+            try:
+                if ext in IMAGE_EXTENSIONS:
+                    return "image", await read_image_part(attachment, ext)
+                return "file", await parse_attachment_file(attachment)
+            except Exception as e:
+                logger.warning(
+                    "[process_attachments] 附件處理失敗 filename=%s: %s",
+                    attachment.filename, e,
+                )
+                return "error", None
+
+    results = await asyncio.gather(*(
+        process_one(attachment)
+        for attachment in attachments[:max_attachments]
+    ))
+    files = [value for kind, value in results if kind == "file" and value is not None]
+    image_parts = [value for kind, value in results if kind == "image" and value is not None]
 
     if len(attachments) > max_attachments:
         logger.info(

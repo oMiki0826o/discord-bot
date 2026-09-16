@@ -116,7 +116,12 @@ async def _exec_memory(user_id: str, channel_id: str, query: str) -> str:
     try:
         from core.ai.memory_manager import search
         from core.ai.user_context import get_global_memories
-        bundle = search(user_id, channel_id, query, await get_global_memories())
+        bundle = await search(
+            user_id,
+            channel_id,
+            query,
+            await get_global_memories(),
+        )
         if bundle.memories:
             lines = [f"- [{kw}] '{c}'" for kw, c, _ in bundle.memories[:5]]
             return "=== 工具：相關記憶 ===\n" + "\n".join(lines)

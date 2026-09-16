@@ -51,6 +51,11 @@ import database.repository.user_repository as repo
 from core.ai.gemini_client import client
 from core.ai.json_utils import strip_json_fence
 from core.ai.models import MODELS
+from core.ai.quota_manager import (
+    background_request,
+    is_quota_error,
+    mark_quota_exhausted,
+)
 from utils.async_db import to_thread
 
 # ── import 路徑修正（原路徑 from core import event_bus 為錯誤路徑） ──────────────────────
@@ -82,6 +87,7 @@ _PROFILE_SYSTEM  = (
     "無法判斷的欄位省略。格式：\n"
     '{"topics":["話題"],"style":"正式/輕鬆/幽默","lang":"zh_tw","notes":"其他"}'
 )
+_profile_jobs_in_progress: set[str] = set()
 
 
 # ── 資料結構 ──────────────────────
@@ -291,17 +297,25 @@ async def update_profile_from_interaction(
     背景執行：AI 分析對話更新 profile。
     由 event_bus 觸發，任何例外靜默處理。
     """
+    if user_id in _profile_jobs_in_progress:
+        logger.debug("[user_context] coalesced profile job user=%s", user_id)
+        return
+    _profile_jobs_in_progress.add(user_id)
     try:
-        res = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model    = _PROFILE_MODEL,
-                contents = f"User: {user_msg[:500]}\nAI: {ai_msg[:500]}",
-                config   = types.GenerateContentConfig(
-                    system_instruction=_PROFILE_SYSTEM,
+        async with background_request(_PROFILE_MODEL) as allowed:
+            if not allowed:
+                logger.debug("[user_context] profile deferred user=%s", user_id)
+                return
+            res = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model    = _PROFILE_MODEL,
+                    contents = f"User: {user_msg[:500]}\nAI: {ai_msg[:500]}",
+                    config   = types.GenerateContentConfig(
+                        system_instruction=_PROFILE_SYSTEM,
+                    ),
                 ),
-            ),
-            timeout=_PROFILE_TIMEOUT,
-        )
+                timeout=_PROFILE_TIMEOUT,
+            )
         raw = (res.text or "").strip()
         raw = strip_json_fence(raw)
         if not raw:
@@ -327,7 +341,11 @@ async def update_profile_from_interaction(
     except asyncio.TimeoutError:
         logger.debug("[user_context] profile timeout user=%s", user_id)
     except Exception as e:
+        if is_quota_error(e):
+            mark_quota_exhausted(_PROFILE_MODEL)
         logger.debug("[user_context] profile error user=%s: %s", user_id, e)
+    finally:
+        _profile_jobs_in_progress.discard(user_id)
 
 
 # ── 展示資料（供 $社交 指令使用） ──────────────────────

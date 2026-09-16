@@ -250,8 +250,30 @@ async def _close_ticket(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("此工單已關閉", ephemeral=True)
         return
 
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        await interaction.response.send_message("此功能僅限伺服器使用", ephemeral=True)
+        return
+
+    settings = await guild_repo.get_settings(interaction.guild.id)
+    support_id = int(settings.get("ticket_support_role", 0) or 0)
+    is_support = support_id != 0 and any(role.id == support_id for role in member.roles)
+    can_close = (
+        str(member.id) == str(ticket["user_id"])
+        or is_support
+        or member.guild_permissions.manage_channels
+    )
+    if not can_close:
+        await interaction.response.send_message(
+            "只有工單建立者、支援身份組或頻道管理者可以關閉工單。",
+            ephemeral=True,
+        )
+        return
+
     closed_by = str(interaction.user.id)
-    await ticket_repo.close_ticket(channel.id, closed_by)
+    if not await ticket_repo.close_ticket(channel.id, closed_by):
+        await interaction.response.send_message("此工單已被其他人關閉", ephemeral=True)
+        return
 
     await interaction.response.send_message(
         f"工單已由 {interaction.user.mention} 關閉，頻道將在 5 秒後封存或刪除",
@@ -262,7 +284,6 @@ async def _close_ticket(interaction: discord.Interaction) -> None:
     await asyncio.sleep(5)
 
     # ── 封存或刪除 ──────────────────────
-    settings     = await guild_repo.get_settings(interaction.guild.id)
     archive_name = _s_get('ticket.archive_category', '')
 
     if archive_name:
@@ -308,12 +329,15 @@ class Ticket(commands.Cog):
         bot.add_view(CloseView())
         bot.add_view(TicketPanel())
 
-    ticket_group = app_commands.Group(name="ticket", description="工單系統")
+    ticket_group = app_commands.Group(
+        name="ticket", description="工單系統", guild_only=True,
+    )
 
     # ── /ticket open ──────────────────────
 
     @ticket_group.command(name="open", description="建立新工單")
     @app_commands.describe(topic="工單主題（選填）")
+    @app_commands.checks.bot_has_permissions(manage_channels=True)
     async def cmd_open(
         self,
         interaction: discord.Interaction,
@@ -324,6 +348,7 @@ class Ticket(commands.Cog):
     # ── /ticket close ──────────────────────
 
     @ticket_group.command(name="close", description="關閉目前頻道的工單")
+    @app_commands.checks.bot_has_permissions(manage_channels=True)
     async def cmd_close(self, interaction: discord.Interaction) -> None:
         await _close_ticket(interaction)
 
@@ -332,6 +357,8 @@ class Ticket(commands.Cog):
     @ticket_group.command(name="add", description="將成員加入工單頻道")
     @app_commands.describe(member="要加入的成員")
     @app_commands.default_permissions(moderate_members=True)
+    @app_commands.checks.has_permissions(moderate_members=True)
+    @app_commands.checks.bot_has_permissions(manage_channels=True)
     async def cmd_add(
         self,
         interaction: discord.Interaction,
@@ -367,6 +394,8 @@ class Ticket(commands.Cog):
     @ticket_group.command(name="remove", description="從工單頻道移除成員")
     @app_commands.describe(member="要移除的成員")
     @app_commands.default_permissions(moderate_members=True)
+    @app_commands.checks.has_permissions(moderate_members=True)
+    @app_commands.checks.bot_has_permissions(manage_channels=True)
     async def cmd_remove(
         self,
         interaction: discord.Interaction,
@@ -396,6 +425,7 @@ class Ticket(commands.Cog):
 
     @ticket_group.command(name="stats", description="查看伺服器工單統計")
     @app_commands.default_permissions(moderate_members=True)
+    @app_commands.checks.has_permissions(moderate_members=True)
     async def cmd_stats(self, interaction: discord.Interaction) -> None:
         stats = await ticket_repo.get_guild_stats(interaction.guild.id)
 
@@ -414,6 +444,8 @@ class Ticket(commands.Cog):
 
     @ticket_group.command(name="panel", description="在目前頻道發送工單建立面板")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.bot_has_permissions(send_messages=True, embed_links=True)
     async def cmd_panel(self, interaction: discord.Interaction) -> None:
         """
         在當前頻道發送一個帶有「建立工單」按鈕的嵌入訊息，

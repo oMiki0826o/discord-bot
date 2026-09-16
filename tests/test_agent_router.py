@@ -14,25 +14,33 @@ Modification():
 
 from __future__ import annotations
 
-from core.ai.agent_router import route
-from core.ai.models import DEFAULT_MODEL, GROUNDING_MIN_MODEL, MODELS
+from core.ai.agent_router import route, strip_model_prefix
+from core.ai.models import get_primary_model
 
 
 def test_default_greeting_uses_default_model_no_search():
     decision = route("你好")
-    assert decision.model == DEFAULT_MODEL
+    assert decision.category == "gemini"
+    assert decision.model == "gemini-3.1-flash-lite"
     assert decision.use_search is False
 
 
-def test_search_keyword_upgrades_to_grounding_model():
+def test_search_keyword_uses_default_gemini_model():
     decision = route("幫我查一下今天天氣")
     assert decision.use_search is True
-    assert decision.model == GROUNDING_MIN_MODEL
+    assert decision.category == "gemini"
+    assert decision.model == get_primary_model("gemini")
+
+
+def test_ordinary_time_words_and_checking_do_not_trigger_search():
+    assert route("我現在心情不錯").use_search is False
+    assert route("請幫我檢查這段文字").use_search is False
 
 
 def test_user_override_flash_without_search():
     decision = route("用flash 幫我寫一首詩")
-    assert decision.model == MODELS["flash"]
+    assert decision.category == "flash"
+    assert decision.model == get_primary_model("flash")
     assert decision.use_search is False
 
 
@@ -44,7 +52,8 @@ def test_user_override_gemma_with_search_gets_upgraded():
     """
     decision = route("用gemma 幫我查一下最新匯率")
     assert decision.use_search is True
-    assert decision.model == GROUNDING_MIN_MODEL
+    assert decision.category == "flash"
+    assert decision.model == get_primary_model("flash")
 
 
 def test_user_override_gemini_lite_with_search_not_upgraded():
@@ -54,12 +63,25 @@ def test_user_override_gemini_lite_with_search_not_upgraded():
     """
     decision = route("用gemini 幫我查一下最新股價")
     assert decision.use_search is True
-    assert decision.model == MODELS["lite"]
+    assert decision.category == "gemini"
+    assert decision.model == get_primary_model("gemini")
+
+
+def test_strip_model_prefix_removes_leading_selector():
+    assert strip_model_prefix("用gemini 幫我整理這段文字") == "幫我整理這段文字"
+    assert strip_model_prefix("用flash：幫我分析這段程式") == "幫我分析這段程式"
+    assert strip_model_prefix("用gemma,寫一篇文章") == "寫一篇文章"
+
+
+def test_strip_model_prefix_keeps_selector_words_inside_prompt():
+    prompt = "請解釋為什麼要用flash 而不是 gemma"
+    assert strip_model_prefix(prompt) == prompt
 
 
 def test_pro_keyword_routes_to_flash_without_search():
     decision = route("這段python程式可以幫我除錯嗎")
-    assert decision.model == MODELS["flash"]
+    assert decision.category == "flash"
+    assert decision.model == get_primary_model("flash")
     assert decision.use_search is False
 
 

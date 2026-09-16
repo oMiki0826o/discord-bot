@@ -33,7 +33,12 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 
-from core.ai.models import DEFAULT_MODEL, GROUNDING_MIN_MODEL, MODELS, is_gemini
+from core.ai.models import (
+    GROUNDING_CATEGORY,
+    category_for_model,
+    get_default_category,
+    get_primary_model,
+)
 from core.ai.tool_registry import get_executor, select_tools
 
 logger = logging.getLogger("bot.agent_router")
@@ -41,13 +46,11 @@ logger = logging.getLogger("bot.agent_router")
 # ── 模型選擇用關鍵字表 ──────────────────────
 
 _WEB_KEYWORDS: tuple[str, ...] = (
-    "最新", "新聞", "即時", "現在", "今天", "今日", "近期", "最近",
-    "幾點", "天氣", "股價", "匯率", "價格",
-    "查", "搜尋", "找一下", "查一下", "幫我查",
+    "最新", "新聞", "即時", "天氣", "股價", "匯率", "價格",
+    "搜尋", "查詢", "找一下", "查一下", "幫我查",
     "search", "find", "look up", "what happened",
     "latest", "current", "update", "weather",
     "http://", "https://",
-    "哪裡", "地址", "在哪",
 )
 
 # 手動指定模型時的文字關鍵字前綴（「用flash」「用gemini」…）。抽成
@@ -55,14 +58,14 @@ _WEB_KEYWORDS: tuple[str, ...] = (
 # （例如改成「model:flash」），只需要改這一處。
 _OVERRIDE_KEYWORD_PREFIX = "用"
 
-# 可手動指定的模型：key 是對外（文字關鍵字／Discord 下拉選單）看到
-# 的名稱，value 是 core.ai.models.MODELS 對應的實際模型字串。
+# 可手動指定的模型類別：key 是對外（文字關鍵字／Discord 下拉選單）
+# 看到的名稱，value 是 settings.json 模型池的類別名稱。
 # cogs/ai/ai_command.py 的 Discord Choice 選單與下方 _MODEL_OVERRIDES
 # 皆由此表推導，全專案僅此一份，不重複硬編碼。
 MODEL_CHOICES: dict[str, str] = {
-    "flash":  MODELS["flash"],
-    "gemini": MODELS["lite"],
-    "gemma":  MODELS["gemma"],
+    "gemini": "gemini",
+    "flash":  "flash",
+    "gemma":  "gemma",
 }
 
 _MODEL_OVERRIDES: tuple[tuple[str, str], ...] = tuple(
@@ -84,6 +87,11 @@ class RouteDecision:
     model:      str
     use_search: bool
     tools:      list[str] = field(default_factory=list)
+    category:   str = ""
+
+    def __post_init__(self) -> None:
+        if not self.category:
+            self.category = category_for_model(self.model)
 
     def needs(self, tool: str) -> bool:
         return tool in self.tools
@@ -104,71 +112,85 @@ def route(prompt: str, model_override: str | None = None) -> RouteDecision:
         model_override: MODEL_CHOICES 其中一個 key（來自 /ai 指令的
                          下拉選單）；None 表示交由自動規則判斷。
     """
-    model, use_search = _select_model(prompt, model_override)
-    tools             = select_tools(prompt)
+    category, use_search = _select_category(prompt, model_override)
+    model                = get_primary_model(category)
+    tools                = select_tools(prompt)
 
     logger.info(
-        "[agent_router] model=%s search=%s tools=%s override=%s",
-        model, use_search, tools, model_override,
+        "[agent_router] category=%s model=%s search=%s tools=%s override=%s",
+        category, model, use_search, tools, model_override,
     )
-    return RouteDecision(model=model, use_search=use_search, tools=tools)
+    return RouteDecision(
+        model=model, category=category, use_search=use_search, tools=tools,
+    )
 
 
 def needs_web_search(prompt: str) -> bool:
     p = prompt.lower()
     return any(k in p for k in _WEB_KEYWORDS)
 
+
+def strip_model_prefix(prompt: str) -> str:
+    """移除 prompt 開頭的模型選擇語句，保留其他位置的原文。"""
+    lowered = prompt.lower()
+    for keyword, _category in _MODEL_OVERRIDES:
+        if lowered.startswith(keyword):
+            return prompt[len(keyword):].lstrip(" \t:：,，")
+    return prompt
+
 # ── 模型選擇 ──────────────────────
 
-def _select_model(prompt: str, model_override: str | None) -> tuple[str, bool]:
-    """回傳 (model, use_search)。"""
+def _select_category(prompt: str, model_override: str | None) -> tuple[str, bool]:
+    """回傳 (category, use_search)。"""
     p          = prompt.lower()
     use_search = needs_web_search(prompt)
 
     # ── 1. /ai 指令下拉選單明確指定 ──────────────────────
     if model_override is not None:
-        model = MODEL_CHOICES.get(model_override)
-        if model is None:
+        category = MODEL_CHOICES.get(model_override)
+        if category is None:
             logger.warning(
                 "[agent_router] 未知的 model_override=%s，忽略並改用自動判斷",
                 model_override,
             )
         else:
-            return _guard_search_capability(model, use_search)
+            return _guard_search_capability(category, use_search)
 
     # ── 2. prompt 文字內的關鍵字指定 ──────────────────────
-    for keyword, model in _MODEL_OVERRIDES:
+    for keyword, category in _MODEL_OVERRIDES:
         if keyword in p:
-            logger.info("[agent_router] keyword_override=%s", model)
-            return _guard_search_capability(model, use_search)
+            logger.info("[agent_router] keyword_override=%s", category)
+            return _guard_search_capability(category, use_search)
 
     # ── 3. 需要搜尋 → 強制使用支援搜尋的模型 ──────────────────────
     if use_search:
-        model = DEFAULT_MODEL if is_gemini(DEFAULT_MODEL) else GROUNDING_MIN_MODEL
-        return model, True
+        category = get_default_category()
+        if category == "gemma":
+            category = GROUNDING_CATEGORY
+        return category, True
 
     # ── 4. 程式 / 數學 / 分析 → Flash ──────────────────────
     if any(kw in p for kw in _PRO_KEYWORDS):
-        return MODELS["flash"], False
+        return "flash", False
 
     # ── 5. 預設 ──────────────────────
-    return DEFAULT_MODEL, False
+    return get_default_category(), False
 
 
-def _guard_search_capability(model: str, use_search: bool) -> tuple[str, bool]:
+def _guard_search_capability(category: str, use_search: bool) -> tuple[str, bool]:
     """
     手動指定模型（不論來自指令參數或文字關鍵字）時的保護檢查：
-    若目前 prompt 需要搜尋，但指定的模型不支援搜尋（非 Gemini 家族），
-    強制升級為 GROUNDING_MIN_MODEL 並記錄警告，避免搜尋請求送到不
+    若目前 prompt 需要搜尋，但指定 Gemma 類別，
+    強制升級為 Flash 類別並記錄警告，避免搜尋請求送到不
     支援搜尋的模型後靜默失敗或得到過期答案。
     """
-    if use_search and not is_gemini(model):
+    if use_search and category == "gemma":
         logger.warning(
-            "[agent_router] 指定模型 %s 不支援搜尋，升級為 %s",
-            model, GROUNDING_MIN_MODEL,
+            "[agent_router] 指定類別 %s 不支援搜尋，升級為 %s",
+            category, GROUNDING_CATEGORY,
         )
-        return GROUNDING_MIN_MODEL, use_search
-    return model, use_search
+        return GROUNDING_CATEGORY, use_search
+    return category, use_search
 
 # ── Tool 執行 ──────────────────────
 

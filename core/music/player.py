@@ -54,7 +54,7 @@ import logging
 
 import discord
 
-from core.music.queue import MusicQueue, LoopMode
+from core.music.queue import MusicQueue, LoopMode, QueueFullError
 from core.music.song  import Song
 from core.system.settings import get, get_int
 
@@ -189,19 +189,26 @@ class GuildPlayer:
         if channel:
             self.text_channel = channel
 
+        if self.queue.size >= self.queue.max_size:
+            raise QueueFullError(f"播放佇列已滿（最多 {self.queue.max_size} 首）")
+
         was_active     = self.is_active
         songs, skipped = await Song.from_playlist(url, requester)
 
-        for song in songs:
+        available = max(0, self.queue.max_size - self.queue.size)
+        accepted  = songs[:available]
+        skipped  += len(songs) - len(accepted)
+
+        for song in accepted:
             self.queue.add(song)
 
-        if not was_active and songs:
+        if not was_active and accepted:
             async with self._play_lock:
                 if not self.is_active:
                     self._auto_notify = False
                     await self._play_next()
 
-        return songs, skipped
+        return accepted, skipped
 
     # ── 播放核心 ──────────────────────
 
@@ -320,7 +327,8 @@ class GuildPlayer:
         self._idle_task = asyncio.create_task(self._idle_disconnect())
 
     def _cancel_idle_timer(self) -> None:
-        if self._idle_task and not self._idle_task.done():
+        current = asyncio.current_task()
+        if self._idle_task and self._idle_task is not current and not self._idle_task.done():
             self._idle_task.cancel()
         self._idle_task = None
 
@@ -340,7 +348,8 @@ class GuildPlayer:
 
     def _cancel_watchdog(self) -> None:
         """停止健康監控迴圈（disconnect() 時呼叫）。"""
-        if self._watchdog_task and not self._watchdog_task.done():
+        current = asyncio.current_task()
+        if self._watchdog_task and self._watchdog_task is not current and not self._watchdog_task.done():
             self._watchdog_task.cancel()
         self._watchdog_task      = None
         self._disconnected_since = None

@@ -18,11 +18,15 @@ Modification():
 - 使用每位使用者獨立 asyncio.Lock 取代全域 bool，避免並發請求競態
 - 附件上限、冷卻秒數與使用者提示文案改由 settings.json 控制
 - AI listener 會略過已被辨識為前綴指令的訊息，避免與 mention 對話互相干擾
+- AI listener 僅略過自己發出的訊息，允許其他 Bot／應用透過 mention 呼叫
+- 其他 Bot／應用是否可以呼叫 AI，可由 ai.allow_other_applications 開關控制
+- AI 處理及產生回覆期間只顯示 Discord typing 指示器，
+  不再送出「思考中...」佔位訊息
 - 附件仍分流為 file_parser 解析結果或 Gemini 圖片 Part，單一附件失敗不終止整體流程
 
 職責：
 - 監聽 Discord mention 訊息，作為 AI 對話的薄入口
-- 送出「思考中...」佔位訊息，並依回覆長度決定編輯文字或改傳 .txt 附件
+- AI 完成後才送出回覆，並依回覆長度決定直接回覆或改傳 .txt 附件
 - 與 cogs/ai/ai_command.py（/ai 指令）共用 core.ai.attachment_utils
   與 core.ai.request_guard，是同一套 AI 對話能力的兩種呼叫方式
 """
@@ -31,6 +35,7 @@ from __future__ import annotations
 
 import io
 import logging
+from time import perf_counter
 
 import discord
 from discord.ext import commands
@@ -38,7 +43,8 @@ from discord.ext import commands
 from core.ai.attachment_utils import process_attachments
 from core.ai.core import generate
 from core.ai.request_guard import check_cooldown, cooldown_message, lock_for
-from core.system.settings import get_int, get_str
+from core.ai.streaming_response import StreamingResponse
+from core.system.settings import get_bool, get_int, get_str
 
 logger = logging.getLogger("bot.ai.chat")
 
@@ -71,49 +77,27 @@ class Chat(commands.Cog):
 
     async def send_response(
         self,
-        thinking: discord.Message,
-        text:     str,
         original: discord.Message,
+        text:     str,
     ) -> None:
         """
         決策流程：
-        1. text 為空 → edit 為（回覆為空），避免 error 50006
-        2. text ≤ ai.max_reply_length → edit「思考中...」訊息
-        3. text > ai.max_reply_length → 刪除「思考中...」，改傳 .txt 附件
+        1. text 為空 → 回覆（回覆為空）
+        2. text ≤ ai.max_reply_length → 直接回覆文字
+        3. text > ai.max_reply_length → 改傳 .txt 附件
         """
         if not text or not text.strip():
-            await self._safe_edit(thinking, get_str("ai.empty_reply_message", "（回覆為空）"))
+            await original.reply(get_str("ai.empty_reply_message", "（回覆為空）"))
             return
 
         if len(text) <= max(1, get_int("ai.max_reply_length", 1500)):
-            await self._safe_edit(thinking, text)
+            await original.reply(text)
             return
 
         # ── 長回覆：轉成 txt 附件 ──────────────────────
-        try:
-            await thinking.delete()
-        except discord.HTTPException:
-            pass   # 已被刪除或無權限，忽略
-
         buf  = io.BytesIO(text.encode("utf-8"))
         file = discord.File(buf, filename="response.txt")
         await original.reply(content=get_str("ai.long_reply_notice", "回覆內容較長，請見附件"), file=file)
-
-    async def _safe_edit(
-        self,
-        message: discord.Message,
-        content: str,
-    ) -> None:
-        """
-        包裝 message.edit()，靜默忽略 error 50006（空訊息）。
-        其他 HTTPException 繼續往上傳遞，由 handle_ai 的 except 捕捉並 log。
-        """
-        try:
-            await message.edit(content=content)
-        except discord.HTTPException as e:
-            if e.code == 50006:
-                return
-            raise
 
     # ── AI 主流程 ──────────────────────
 
@@ -126,9 +110,8 @@ class Chat(commands.Cog):
         完整的 AI 請求流程：
         1. 冷卻 & 鎖定檢查
         2. 解析附件（圖片 Part / file_parser 結果）
-        3. 送出「思考中...」佔位訊息
-        4. 等待 generate() 回傳完整文字
-        5. 根據長度決定更新方式
+        3. 等待 generate() 回傳完整文字，期間持續顯示 typing
+        4. 根據長度決定回覆方式
         """
         user_id = message.author.id
         lock = lock_for(user_id)
@@ -143,11 +126,12 @@ class Chat(commands.Cog):
             await message.reply(cooldown_message())
             return
 
-        async with lock:
+        async with lock, message.channel.typing():
+            request_started = perf_counter()
             # ── 附件解析（鎖定後才處理，避免並發請求重複下載） ──────────────────────
             files, image_parts = await process_attachments(message.attachments)
-
-            thinking = await message.reply(get_str("ai.thinking_message", "思考中..."))
+            attachment_elapsed = perf_counter() - request_started
+            stream = StreamingResponse(message.reply)
 
             try:
                 text = await generate(
@@ -156,8 +140,15 @@ class Chat(commands.Cog):
                     channel_id=str(message.channel.id),
                     files=files,
                     image_parts=image_parts,
+                    on_chunk=stream.push,
+                    on_retry=stream.reset,
                 )
-                await self.send_response(thinking, text, original=message)
+                if not await stream.finish(text):
+                    await self.send_response(message, text)
+                logger.info(
+                    "[timing] user=%s attachments=%.3fs discord_total=%.3fs",
+                    user_id, attachment_elapsed, perf_counter() - request_started,
+                )
 
             except Exception as e:
                 logger.exception(
@@ -168,7 +159,8 @@ class Chat(commands.Cog):
                     error_message = template.format(error=type(e).__name__)
                 except (KeyError, ValueError):
                     error_message = f"錯誤：{type(e).__name__}"
-                await self._safe_edit(thinking, error_message)
+                if not await stream.finish(error_message):
+                    await message.reply(error_message)
 
     # ── 指令訊息判斷 ──────────────────────
 
@@ -181,13 +173,15 @@ class Chat(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        """只在被 mention 時才回應，忽略 bot 自己的訊息。"""
-        if message.author.bot:
+        """只在被 mention 時才回應，且僅忽略自己發出的訊息。"""
+        bot_user = self.bot.user
+        if bot_user is not None and message.author.id == bot_user.id:
+            return
+        if message.author.bot and not get_bool("ai.allow_other_applications", True):
             return
         if await self._is_command_message(message):
             return
 
-        bot_user = self.bot.user
         if bot_user is None or bot_user not in message.mentions:
             return
 

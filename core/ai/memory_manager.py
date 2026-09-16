@@ -77,6 +77,12 @@ import database.repository.memory_repository as repo
 from core.ai.gemini_client import client
 from core.ai.json_utils import strip_json_fence
 from core.ai.models import EMBED_MODEL, MODELS
+from core.ai.quota_manager import (
+    background_request,
+    foreground_request,
+    is_quota_error,
+    mark_quota_exhausted,
+)
 from core.system import event_bus
 from core.system.settings import get_float, get_int
 
@@ -103,6 +109,7 @@ _SUMMARY_SYSTEM = (
 # ── 簡易記憶快取（TTL 由 settings.json 統一管理） ──────────────────────
 
 _search_cache: dict[str, tuple[float, MemoryBundle]] = {}
+_memory_jobs_in_progress: set[str] = set()
 
 # ── 設定讀取 ──────────────────────
 
@@ -290,25 +297,36 @@ async def _on_message_generated(
     **_,
 ) -> None:
     """event_bus 觸發：擷取記憶 → 嘗試摘要 → 向量化。"""
-    await _extract(user_id, user_msg, ai_msg)
-    await _summarize_if_needed(user_id)
-    await _vectorize_recent(user_id, user_msg)
+    if user_id in _memory_jobs_in_progress:
+        logger.debug("[memory_manager] coalesced background job user=%s", user_id)
+        return
+    _memory_jobs_in_progress.add(user_id)
+    try:
+        await _extract(user_id, user_msg, ai_msg)
+        await _summarize_if_needed(user_id)
+        await _vectorize_recent(user_id, user_msg)
+    finally:
+        _memory_jobs_in_progress.discard(user_id)
 
 
 async def _extract(user_id: str, user_input: str, ai_output: str) -> None:
     if len(user_input) + len(ai_output) < _min_extract_chars():
         return
     try:
-        res = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model    = _EXTRACT_MODEL,
-                contents = f"User: {user_input}\nAI: {ai_output}",
-                config   = types.GenerateContentConfig(
-                    system_instruction=_EXTRACT_SYSTEM,
+        async with background_request(_EXTRACT_MODEL) as allowed:
+            if not allowed:
+                logger.debug("[memory_manager] extract deferred user=%s", user_id)
+                return
+            res = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model    = _EXTRACT_MODEL,
+                    contents = f"User: {user_input}\nAI: {ai_output}",
+                    config   = types.GenerateContentConfig(
+                        system_instruction=_EXTRACT_SYSTEM,
+                    ),
                 ),
-            ),
-            timeout=_extract_timeout(),
-        )
+                timeout=_extract_timeout(),
+            )
         raw     = (res.text or "").strip()
         cleaned = strip_json_fence(raw)
         data    = json.loads(cleaned)
@@ -334,6 +352,8 @@ async def _extract(user_id: str, user_input: str, ai_output: str) -> None:
     except asyncio.TimeoutError:
         logger.debug("[memory_manager] extract timeout user=%s", user_id)
     except Exception as e:
+        if is_quota_error(e):
+            mark_quota_exhausted(_EXTRACT_MODEL)
         logger.debug("[memory_manager] extract error user=%s: %s", user_id, e)
 
 
@@ -349,16 +369,20 @@ async def _summarize_if_needed(user_id: str) -> None:
         f"{role}: {content[:line_max_chars]}" for role, content in messages
     )
     try:
-        res = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model    = _SUMMARY_MODEL,
-                contents = conversation,
-                config   = types.GenerateContentConfig(
-                    system_instruction=_SUMMARY_SYSTEM,
+        async with background_request(_SUMMARY_MODEL) as allowed:
+            if not allowed:
+                logger.debug("[memory_manager] summary deferred user=%s", user_id)
+                return
+            res = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model    = _SUMMARY_MODEL,
+                    contents = conversation,
+                    config   = types.GenerateContentConfig(
+                        system_instruction=_SUMMARY_SYSTEM,
+                    ),
                 ),
-            ),
-            timeout=_summary_timeout(),
-        )
+                timeout=_summary_timeout(),
+            )
         summary = (res.text or "").strip()
         if summary:
             await repo.upsert_summary(user_id, summary, count)
@@ -369,6 +393,8 @@ async def _summarize_if_needed(user_id: str) -> None:
     except asyncio.TimeoutError:
         logger.debug("[memory_manager] summary timeout user=%s", user_id)
     except Exception as e:
+        if is_quota_error(e):
+            mark_quota_exhausted(_SUMMARY_MODEL)
         logger.debug("[memory_manager] summary error user=%s: %s", user_id, e)
 
 
@@ -377,7 +403,7 @@ async def _vectorize_recent(user_id: str, query: str) -> None:
     await asyncio.sleep(_vectorize_delay_seconds())
     mems = await repo.get_memories_candidate(user_id, limit=_vector_candidate_limit())
     for kw, content, imp in mems:
-        vec = await _embed(f"{kw}: {content}")
+        vec = await _embed(f"{kw}: {content}", background=True)
         if vec:
             await repo.upsert_vector(user_id, kw, content, vec, imp)
 
@@ -392,21 +418,24 @@ async def force_summarize(user_id: str) -> str:
         f"{role}: {content[:line_max_chars]}" for role, content in messages
     )
     try:
-        res = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model    = _SUMMARY_MODEL,
-                contents = conversation,
-                config   = types.GenerateContentConfig(
-                    system_instruction=_SUMMARY_SYSTEM,
+        async with foreground_request():
+            res = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model    = _SUMMARY_MODEL,
+                    contents = conversation,
+                    config   = types.GenerateContentConfig(
+                        system_instruction=_SUMMARY_SYSTEM,
+                    ),
                 ),
-            ),
-            timeout=_summary_timeout(),
-        )
+                timeout=_summary_timeout(),
+            )
         summary = (res.text or "").strip()
         if summary:
             await repo.upsert_summary(user_id, summary, len(messages))
         return summary
     except Exception as e:
+        if is_quota_error(e):
+            mark_quota_exhausted(_SUMMARY_MODEL)
         logger.debug("[memory_manager] force_summarize error: %s", e)
         return ""
 
@@ -421,23 +450,36 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
 
 
-async def _embed(text: str) -> list[float] | None:
+async def _embed(text: str, *, background: bool = False) -> list[float] | None:
     try:
-        res = await asyncio.wait_for(
-            client.aio.models.embed_content(
-                model    = _EMBED_MODEL,
-                contents = text[:_embedding_max_chars()],
-            ),
-            timeout=_embed_timeout(),
-        )
+        if background:
+            async with background_request(_EMBED_MODEL) as allowed:
+                if not allowed:
+                    return None
+                res = await _call_embed(text)
+        else:
+            async with foreground_request():
+                res = await _call_embed(text)
         embeddings = getattr(res, "embeddings", None)
         if embeddings and embeddings[0].values:
             return list(embeddings[0].values)
     except asyncio.TimeoutError:
         logger.debug("[memory_manager] embed timeout")
     except Exception as e:
+        if is_quota_error(e):
+            mark_quota_exhausted(_EMBED_MODEL)
         logger.debug("[memory_manager] embed error: %s", e)
     return None
+
+
+async def _call_embed(text: str):
+    return await asyncio.wait_for(
+        client.aio.models.embed_content(
+            model=_EMBED_MODEL,
+            contents=text[:_embedding_max_chars()],
+        ),
+        timeout=_embed_timeout(),
+    )
 
 # ── 事件注冊 ──────────────────────
 

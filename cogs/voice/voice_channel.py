@@ -227,7 +227,9 @@ class VoiceChannel(commands.Cog):
 
     # ── Slash Command 群組 ──────────────────────
 
-    vc_group = app_commands.Group(name="vc", description="語音頻道管理（限頻道擁有者）")
+    vc_group = app_commands.Group(
+        name="vc", description="語音頻道管理（限頻道擁有者）", guild_only=True,
+    )
 
     # ── 權限驗證工具 ──────────────────────
 
@@ -282,6 +284,8 @@ class VoiceChannel(commands.Cog):
         limit    = "預設人數上限（0 = 無上限）",
     )
     @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.bot_has_permissions(manage_channels=True, move_members=True)
     async def cmd_setup(
         self,
         interaction: discord.Interaction,
@@ -567,6 +571,8 @@ class VoiceChannel(commands.Cog):
     @vc_group.command(name="forcedelete", description="管理員強制刪除指定臨時頻道")
     @app_commands.describe(channel="要強制刪除的語音頻道")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.bot_has_permissions(manage_channels=True)
     async def cmd_forcedelete(
         self,
         interaction: discord.Interaction,

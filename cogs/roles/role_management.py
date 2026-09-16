@@ -169,6 +169,11 @@ class _RoleButton(discord.ui.Button):
         if role is None:
             await interaction.response.send_message("此身份組已不存在", ephemeral=True)
             return
+        if role.is_default() or role.managed or role >= interaction.guild.me.top_role:
+            await interaction.response.send_message(
+                "此身份組無法透過自助面板管理", ephemeral=True,
+            )
+            return
 
         try:
             if role in interaction.user.roles:
@@ -275,7 +280,9 @@ class RoleManagement(commands.Cog):
 
         logger.info("[roles] 已重建 %d 個身份組面板 View", count)
 
-    roles_group = app_commands.Group(name="roles", description="身份組面板管理")
+    roles_group = app_commands.Group(
+        name="roles", description="身份組面板管理", guild_only=True,
+    )
 
     # ── /roles panel ──────────────────────
 
@@ -285,6 +292,8 @@ class RoleManagement(commands.Cog):
         description = "面板說明（最多 300 字元）",
     )
     @app_commands.default_permissions(manage_roles=True)
+    @app_commands.checks.has_permissions(manage_roles=True)
+    @app_commands.checks.bot_has_permissions(send_messages=True, embed_links=True, manage_roles=True)
     async def cmd_panel(
         self,
         interaction: discord.Interaction,
@@ -333,6 +342,8 @@ class RoleManagement(commands.Cog):
         app_commands.Choice(name="紅色（danger）",    value="danger"),
     ])
     @app_commands.default_permissions(manage_roles=True)
+    @app_commands.checks.has_permissions(manage_roles=True)
+    @app_commands.checks.bot_has_permissions(manage_roles=True)
     async def cmd_add(
         self,
         interaction: discord.Interaction,
@@ -350,8 +361,22 @@ class RoleManagement(commands.Cog):
             return
 
         panel = _get_panel_by_message(msg_id)
-        if not panel:
+        if not panel or panel["guild_id"] != interaction.guild.id:
             await interaction.response.send_message("找不到此面板（訊息 ID 錯誤，或非此 Bot 建立）", ephemeral=True)
+            return
+
+        member = interaction.user
+        assert isinstance(member, discord.Member)
+        if (
+            role.is_default()
+            or role.managed
+            or role >= interaction.guild.me.top_role
+            or (member.id != interaction.guild.owner_id and role >= member.top_role)
+        ):
+            await interaction.response.send_message(
+                "無法將預設、整合管理、高於 Bot，或不低於您的身份組加入面板。",
+                ephemeral=True,
+            )
             return
 
         roles = panel["roles"]
@@ -409,6 +434,8 @@ class RoleManagement(commands.Cog):
     @roles_group.command(name="remove", description="從面板移除指定身份組按鈕")
     @app_commands.describe(message_id="面板訊息 ID", role="要移除的身份組")
     @app_commands.default_permissions(manage_roles=True)
+    @app_commands.checks.has_permissions(manage_roles=True)
+    @app_commands.checks.bot_has_permissions(manage_roles=True)
     async def cmd_remove(
         self,
         interaction: discord.Interaction,
@@ -422,7 +449,7 @@ class RoleManagement(commands.Cog):
             return
 
         panel = _get_panel_by_message(msg_id)
-        if not panel:
+        if not panel or panel["guild_id"] != interaction.guild.id:
             await interaction.response.send_message("找不到此面板", ephemeral=True)
             return
 
@@ -466,6 +493,7 @@ class RoleManagement(commands.Cog):
     @roles_group.command(name="delete", description="刪除整個身份組面板（會刪除面板訊息）")
     @app_commands.describe(message_id="面板訊息 ID")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
     async def cmd_delete(
         self,
         interaction: discord.Interaction,
@@ -478,7 +506,7 @@ class RoleManagement(commands.Cog):
             return
 
         panel = _get_panel_by_message(msg_id)
-        if not panel:
+        if not panel or panel["guild_id"] != interaction.guild.id:
             await interaction.response.send_message("找不到此面板", ephemeral=True)
             return
 
@@ -497,6 +525,7 @@ class RoleManagement(commands.Cog):
 
     @roles_group.command(name="list", description="列出伺服器所有身份組面板")
     @app_commands.default_permissions(manage_roles=True)
+    @app_commands.checks.has_permissions(manage_roles=True)
     async def cmd_list(self, interaction: discord.Interaction) -> None:
         panels = _get_panels(interaction.guild.id)
 

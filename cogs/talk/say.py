@@ -4,6 +4,7 @@ cogs/talk/say.py
 職責：
 - /say：以 Bot 身份在目前頻道發送訊息（支援附件、回覆、圖片 URL）
 - 使用者需有 Manage Messages 權限
+- 代發內文會標示發起者：「user id」説：內容
 
 Modification():
 
@@ -16,9 +17,10 @@ Modification():
   但因 bot.py 原本沒有 CommandTree error handler，使用者看到「互動未能回應」
   而非任何說明。已兩面修正：
   1. bot.py 新增 CustomCommandTree.on_error 作為最後防線
-  2. 本指令從 @app_commands.checks.has_permissions（執行期拋出例外）
-     改為 @app_commands.default_permissions（Discord 側前置攔截，
-     Client 直接隱藏或停用此指令，根本不會送達 bot）
+  2. 保留 @app_commands.default_permissions 作為 Discord 側的預設可用權限，
+     並恢復 @app_commands.checks.has_permissions 作為執行期強制驗證。
+     default_permissions 可被伺服器指令覆寫調整，不應單獨當作安全邊界。
+  3. 限制於伺服器頻道，避免 DM 沒有 Manage Messages 語意時的權限繞過。
 
 """
 
@@ -30,7 +32,7 @@ from discord.ext import commands
 
 
 async def _fetch_reference(
-    channel: discord.TextChannel,
+    channel: discord.TextChannel | discord.Thread,
     message_id: str | None,
 ) -> discord.Message | None:
     if not message_id:
@@ -56,12 +58,14 @@ class Say(commands.Cog):
         image2     = "附件圖片 2（選填）",
         image3     = "附件圖片 3（選填）",
     )
-    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+    @app_commands.guild_only()
     @app_commands.default_permissions(manage_messages=True)
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.checks.bot_has_permissions(send_messages=True)
     async def cmd_say(
         self,
         interaction: discord.Interaction,
-        content:     str,
+        content:     app_commands.Range[str, 1, 1976],
         image_url:   str | None                  = None,
         message_id:  str | None                  = None,
         image1:      discord.Attachment | None   = None,
@@ -69,6 +73,19 @@ class Say(commands.Cog):
         image3:      discord.Attachment | None   = None,
     ) -> None:
         channel   = interaction.channel
+        if channel is None:
+            await interaction.response.send_message("找不到可發送訊息的頻道。", ephemeral=True)
+            return
+
+        bot_member = interaction.guild.me
+        bot_permissions = channel.permissions_for(bot_member)
+        if any(img is not None for img in (image1, image2, image3)) and not bot_permissions.attach_files:
+            await interaction.response.send_message("Bot 沒有上傳附件的權限。", ephemeral=True)
+            return
+        if image_url and not bot_permissions.embed_links:
+            await interaction.response.send_message("Bot 沒有嵌入連結的權限。", ephemeral=True)
+            return
+
         reference = await _fetch_reference(channel, message_id)
 
         files = [
@@ -78,7 +95,22 @@ class Say(commands.Cog):
         ]
 
         try:
-            await channel.send(content, files=files, reference=reference)
+            # Bot 代發時明確標記發起者，並且不讓使用者透過
+            # Bot 繞過自己的 Mention Everyone 權限。
+            permissions = channel.permissions_for(interaction.user)
+            allowed_mentions = discord.AllowedMentions(
+                everyone=permissions.mention_everyone,
+                roles=permissions.mention_everyone,
+                users=True,
+                replied_user=True,
+            )
+            labelled_content = f"「{interaction.user.id}」説：{content}"
+            await channel.send(
+                labelled_content,
+                files=files,
+                reference=reference,
+                allowed_mentions=allowed_mentions,
+            )
 
             if image_url:
                 embed = discord.Embed()

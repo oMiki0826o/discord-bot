@@ -45,12 +45,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
 import discord
 import yt_dlp
 
+from core.music.url import is_youtube_url
 from core.system.settings import get, get_int
 
 log = logging.getLogger("bot.music.song")
@@ -93,11 +95,6 @@ def _normalize_query(query: str) -> str:
     if _URL_RE.match(cleaned):
         return cleaned
     return f"{_search_prefix()}:{cleaned}"
-
-
-def _is_valid_url(text: str) -> bool:
-    """判斷輸入是否為合法的 http(s) 網址。"""
-    return bool(_URL_RE.match(text.strip()))
 
 
 # ── YT-DLP 配置 ──────────────────────
@@ -176,6 +173,7 @@ class Song:
     duration:    int
     thumbnail:   str | None
     requester:   discord.Member
+    queue_id:     str = field(default_factory=lambda: uuid4().hex)
 
     @property
     def duration_str(self) -> str:
@@ -192,6 +190,9 @@ class Song:
         非網址一律轉換為明確的搜尋語法，避免含冒號的查詢字串被
         誤判為未知 scheme 的網址。
         """
+        if _URL_RE.match(query.strip()) and not is_youtube_url(query):
+            raise ValueError("僅支援 YouTube 或 YouTube Music 網址")
+
         normalized = _normalize_query(query)
         loop = asyncio.get_event_loop()
         try:
@@ -216,7 +217,7 @@ class Song:
         解析 YouTube 播放清單，回傳 (成功歌曲清單, 跳過數量)。
 
         與 from_query 不同，這裡不會把非網址輸入轉換成搜尋語法：
-        /playlist 指令語意上就是要求提供播放清單網址，若輸入不是
+        /play 的歌單模式就是要求提供播放清單網址，若輸入不是
         合法網址，直接回傳明確錯誤，避免產生語意不清的搜尋結果，
         也避免同樣落入 generic extractor 誤判 scheme 的情況。
 
@@ -224,10 +225,10 @@ class Song:
         影片時不拋出例外，而是在 entries 中回傳 None。
         此處過濾 None 並計算跳過數量，讓呼叫端可告知使用者詳情。
         """
-        if not _is_valid_url(url):
-            raise ValueError("請提供有效的播放清單網址（需以 http:// 或 https:// 開頭）")
+        if not is_youtube_url(url):
+            raise ValueError("請提供有效的 YouTube 或 YouTube Music 播放清單網址")
 
-        limit = get_int("music.max_queue_size", 200)
+        limit = get_int("music.max_queue_size", 50)
         loop  = asyncio.get_event_loop()
         try:
             data: dict[str, Any] = await loop.run_in_executor(

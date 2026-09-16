@@ -12,8 +12,8 @@ Modification():
 - 加入 from __future__ import annotations
 - 檔名改為 typing_indicator.py 避免與標準庫 typing 衝突
 
-- 修正 /typing 與 /typing_stop 的權限檢查方式：由 @app_commands.checks.has_permissions
-  改為 @app_commands.default_permissions（原因同 say.py）
+- /typing 與 /typing_stop 同時使用 default_permissions 與執行期
+  has_permissions，並限制於伺服器頻道。
 
 """
 
@@ -36,6 +36,12 @@ class TypingIndicator(commands.Cog):
         self.bot   = bot
         self._tasks: dict[int, asyncio.Task] = {}   # channel_id → task
 
+    def cog_unload(self) -> None:
+        """重載或卸載 Cog 時停止所有輸入任務，避免背景任務殘留。"""
+        for task in self._tasks.values():
+            task.cancel()
+        self._tasks.clear()
+
     async def _typing_loop(self, channel: discord.TextChannel) -> None:
         """每 9 秒觸發一次 typing，Discord 顯示時長約 10 秒。"""
         try:
@@ -46,7 +52,10 @@ class TypingIndicator(commands.Cog):
             pass
 
     @app_commands.command(name="typing", description="讓 Bot 持續顯示正在輸入")
+    @app_commands.guild_only()
     @app_commands.default_permissions(manage_messages=True)
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.checks.bot_has_permissions(send_messages=True)
     async def cmd_typing_start(self, interaction: discord.Interaction) -> None:
         ch_id = interaction.channel_id
         if ch_id in self._tasks:
@@ -59,7 +68,9 @@ class TypingIndicator(commands.Cog):
         await interaction.response.send_message("已開始 typing。", ephemeral=True)
 
     @app_commands.command(name="typing_stop", description="停止 Bot 的輸入指示器")
+    @app_commands.guild_only()
     @app_commands.default_permissions(manage_messages=True)
+    @app_commands.checks.has_permissions(manage_messages=True)
     async def cmd_typing_stop(self, interaction: discord.Interaction) -> None:
         ch_id = interaction.channel_id
         task  = self._tasks.pop(ch_id, None)

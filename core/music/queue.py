@@ -20,6 +20,11 @@ from collections import deque
 from enum import Enum, auto
 
 from core.music.song import Song
+from core.system.settings import get_int
+
+
+class QueueFullError(ValueError):
+    """播放佇列已達設定上限。"""
 
 
 # ── 循環模式 ──────────────────────
@@ -47,9 +52,13 @@ class MusicQueue:
     # ── 基本操作 ──────────────────────
 
     def add(self, song: Song) -> None:
+        if self.size >= self.max_size:
+            raise QueueFullError(f"播放佇列已滿（最多 {self.max_size} 首）")
         self._queue.append(song)
 
     def insert_at(self, index: int, song: Song) -> None:
+        if self.size >= self.max_size:
+            raise QueueFullError(f"播放佇列已滿（最多 {self.max_size} 首）")
         songs = list(self._queue)
         songs.insert(max(0, index - 1), song)
         self._queue = deque(songs)
@@ -71,6 +80,23 @@ class MusicQueue:
         songs.insert(to_idx - 1, song)
         self._queue = deque(songs)
         return True
+
+    def index_of_id(self, queue_id: str) -> int | None:
+        """依歌曲固定 ID 取得目前的 1-based 位置。"""
+        for index, song in enumerate(self._queue, start=1):
+            if song.queue_id == queue_id:
+                return index
+        return None
+
+    def remove_by_id(self, queue_id: str) -> Song | None:
+        """依歌曲固定 ID 移除，避免播放推進後索引位移而刪錯歌曲。"""
+        index = self.index_of_id(queue_id)
+        return self.remove(index) if index is not None else None
+
+    def move_by_id(self, queue_id: str, to_idx: int) -> bool:
+        """依歌曲固定 ID 移動至指定的 1-based 位置。"""
+        index = self.index_of_id(queue_id)
+        return self.move(index, to_idx) if index is not None else False
 
     def shuffle(self) -> None:
         songs = list(self._queue)
@@ -109,6 +135,10 @@ class MusicQueue:
     @property
     def size(self) -> int:
         return len(self._queue)
+
+    @property
+    def max_size(self) -> int:
+        return max(1, get_int("music.max_queue_size", 50))
 
     @property
     def songs(self) -> list[Song]:

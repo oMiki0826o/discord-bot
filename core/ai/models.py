@@ -18,12 +18,40 @@ Modification():
 
 from __future__ import annotations
 
+import logging
+
+from core.system.settings import get_list, get_str
+
+logger = logging.getLogger("bot.ai.models")
+
 # ── 對話 / 生成模型 ──────────────────────
 
 MODELS: dict[str, str] = {
     "lite":  "gemini-3.1-flash-lite",
     "flash": "gemini-2.5-flash",
     "gemma": "gemma-4-31b-it",
+}
+
+MODEL_CATEGORIES: tuple[str, ...] = ("gemini", "flash", "gemma")
+
+# 使用者只選擇三大類；類別內模型依序輪替。
+# 這份內建清單同時是 settings.json 缺值或格式錯誤時的安全回退。
+DEFAULT_MODEL_POOLS: dict[str, tuple[str, ...]] = {
+    "gemini": (
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash-lite",
+    ),
+    "flash": (
+        "gemini-2.5-flash",
+        "gemini-3-flash-preview",
+        "gemini-3.5-flash",
+        "gemini-3.6-flash",
+        "gemini-3.7-flash",
+        "gemini-3.8-flash",
+    ),
+    "gemma": (
+        "gemma-4-31b-it",
+    ),
 }
 
 # ── 嵌入模型 ──────────────────────
@@ -45,10 +73,63 @@ EMBED_MODEL: str = "gemini-embedding-001"
 
 # ── 預設 / 特殊用途模型 ──────────────────────
 
-DEFAULT_MODEL       = MODELS["gemma"]    # 一般對話預設模型
-GROUNDING_MIN_MODEL = MODELS["flash"]    # 需要 Google Search Grounding 時的最低模型
-MULTIMODAL_MODEL    = MODELS["flash"]    # 圖片 / 未來多模態附件的預設模型
-FALLBACK_MODEL      = MODELS["lite"]     # 主模型失敗時的備援模型
+DEFAULT_CATEGORY    = "gemini"
+GROUNDING_CATEGORY  = "flash"
+MULTIMODAL_CATEGORY = "flash"
+
+
+def get_default_category() -> str:
+    """從 settings.json 取得預設類別，並兼容舊的 lite 設定。"""
+    value = get_str("ai.default_model", DEFAULT_CATEGORY).strip().lower()
+    if value == "lite":
+        value = "gemini"
+    if value not in MODEL_CATEGORIES:
+        logger.warning(
+            "[models] ai.default_model=%r 無效，使用 %s", value, DEFAULT_CATEGORY,
+        )
+        return DEFAULT_CATEGORY
+    return value
+
+
+def get_model_pool(category: str) -> tuple[str, ...]:
+    """取得模型類別的熱重載輪替清單，自動去除空值與重複值。"""
+    normalized = category.strip().lower()
+    fallback = DEFAULT_MODEL_POOLS.get(normalized)
+    if fallback is None:
+        normalized = DEFAULT_CATEGORY
+        fallback = DEFAULT_MODEL_POOLS[normalized]
+
+    configured = get_list(f"ai.model_pools.{normalized}", list(fallback))
+    models = tuple(dict.fromkeys(
+        item.strip() for item in configured
+        if isinstance(item, str) and item.strip()
+    ))
+    if models:
+        return models
+
+    logger.warning("[models] %s 模型池為空，使用內建清單", normalized)
+    return fallback
+
+
+def get_primary_model(category: str) -> str:
+    """回傳類別中第一個（優先）模型。"""
+    return get_model_pool(category)[0]
+
+
+def get_model_candidates(category: str, preferred: str | None = None) -> tuple[str, ...]:
+    """回傳一次請求的候選順序，指定模型可優先排在最前。"""
+    pool = get_model_pool(category)
+    if not preferred or preferred not in pool:
+        return pool
+    return (preferred, *(model for model in pool if model != preferred))
+
+
+def category_for_model(model: str) -> str:
+    """由模型 ID 反查類別，供相容舊呼叫與測試使用。"""
+    for category in MODEL_CATEGORIES:
+        if model in get_model_pool(category):
+            return category
+    return "gemini" if is_gemini(model) else "gemma"
 
 
 # ── 工具函式 ──────────────────────

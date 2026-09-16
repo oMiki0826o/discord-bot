@@ -160,38 +160,50 @@ def build(bundle: ContextBundle) -> str:
     10. 最近對話
     11. 使用者輸入
     """
-    sections: list[str] = []
+    # 每個 section 帶有「保留優先級、原始順序、單區上限」。最後會先依
+    # 優先級分配空間，再恢復原始閱讀順序。這可避免舊版直接對完整字串
+    # 做 [:max_length]，把位於最尾端的最新使用者輸入截掉。
+    sections: list[tuple[int, int, int, str]] = []
+
+    def add_section(text: str, *, priority: int, limit: int) -> None:
+        if text:
+            sections.append((priority, len(sections), limit, text))
 
     # ── 1. 安全提醒 ──────────────────────
     if bundle.security_notice:
-        sections.append(SECURITY_NOTICE)
+        add_section(SECURITY_NOTICE, priority=0, limit=1_000)
 
     # ── 2. 使用者身份 ──────────────────────
     ui = bundle.user_info
-    sections.append(
+    add_section(
         f"=== 當前使用者 ===\n"
         f"Discord ID : {ui['user_id']}\n"
         f"名稱       : {ui['username']}\n"
         f"關係等級   : {ui['tier_name']}（等級 {ui['tier']}，"
-        f"互動 {ui['interaction_count']} 次）"
+        f"互動 {ui['interaction_count']} 次）",
+        priority=0,
+        limit=800,
     )
 
     # ── 3. 對話狀態 ──────────────────────
     if bundle.state_section:
-        sections.append(bundle.state_section)
+        add_section(bundle.state_section, priority=4, limit=600)
 
     # ── 4. 使用者偏好 ──────────────────────
     if bundle.profile_section:
-        sections.append(bundle.profile_section)
+        add_section(bundle.profile_section, priority=3, limit=800)
 
     # ── 5. Tool 結果 ──────────────────────
-    for section in bundle.tool_sections:
-        if section:
-            sections.append(section)
+    tool_text = "\n\n".join(section for section in bundle.tool_sections if section)
+    add_section(tool_text, priority=2, limit=1_500)
 
     # ── 6. 對話摘要（Tool 未注入時才加） ──────────────────────
     if bundle.summary and not any("摘要" in s for s in bundle.tool_sections):
-        sections.append(f"=== 對話摘要 ===\n{bundle.summary}")
+        add_section(
+            f"=== 對話摘要 ===\n{bundle.summary}",
+            priority=3,
+            limit=800,
+        )
 
     # ── 7. 靜態記憶（Tool 已注入相關記憶時跳過，避免重複） ──────────────────────
     if bundle.memories and not any("相關記憶" in s for s in bundle.tool_sections):
@@ -201,28 +213,119 @@ def build(bundle: ContextBundle) -> str:
                 bundle.memories, key=lambda x: x[2], reverse=True,
             )
         ]
-        sections.append("=== 關於此使用者的記憶 ===\n" + "\n".join(lines))
+        add_section(
+            "=== 關於此使用者的記憶 ===\n" + "\n".join(lines),
+            priority=2,
+            limit=1_200,
+        )
 
     # ── 8. 附件解析內容（file_parser） ──────────────────────
     if bundle.files:
+        file_sections: list[str] = []
         # metadata 概覽讓 AI 先掌握整體背景再閱讀內容
         meta = build_metadata(bundle.files)
         if meta:
-            sections.append(meta)
+            file_sections.append(meta)
         for parsed in bundle.files:
-            sections.append(parsed.to_prompt_block())
+            file_sections.append(parsed.to_prompt_block())
+        add_section(
+            "\n\n".join(file_sections),
+            priority=2,
+            limit=1_800,
+        )
+
+    # 相關歷史與最近對話有機會由同一批 DB 訊息產生；先正規化去重，
+    # 並讓 recent 擁有優先權，避免同一句話重複消耗 Prompt 預算。
+    recent = _dedupe_messages(bundle.recent)
+    recent_keys = {_message_key(role, content) for role, content in recent}
+    messages = [
+        item for item in _dedupe_messages(bundle.messages)
+        if _message_key(*item) not in recent_keys
+    ]
 
     # ── 9. 相關歷史訊息 ──────────────────────
-    if bundle.messages:
-        lines = [f"{role}: {content}" for role, content in bundle.messages]
-        sections.append("=== 相關對話 ===\n" + "\n".join(lines))
+    if messages:
+        lines = [f"{role}: {content}" for role, content in messages]
+        add_section(
+            "=== 相關對話 ===\n" + "\n".join(lines),
+            priority=4,
+            limit=1_200,
+        )
 
     # ── 10. 最近對話 ──────────────────────
-    if bundle.recent:
-        lines = [f"{role}: {content}" for role, content in bundle.recent]
-        sections.append("=== 最近對話 ===\n" + "\n".join(lines))
+    if recent:
+        lines = [f"{role}: {content}" for role, content in recent]
+        add_section(
+            "=== 最近對話 ===\n" + "\n".join(lines),
+            priority=1,
+            limit=1_800,
+        )
 
     # ── 11. 使用者輸入 ──────────────────────
-    sections.append(f"User: {bundle.user_input}\nAI:")
+    user_section = f"User: {bundle.user_input}\nAI:"
 
-    return "\n\n".join(sections)[: bundle.max_length]
+    return _compose_with_budget(sections, user_section, bundle.max_length)
+
+
+def _message_key(role: str, content: str) -> tuple[str, str]:
+    return role.strip().casefold(), content.strip()
+
+
+def _dedupe_messages(
+    messages: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    seen: set[tuple[str, str]] = set()
+    result: list[tuple[str, str]] = []
+    for role, content in messages:
+        key = _message_key(role, content)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append((role, content))
+    return result
+
+
+def _truncate(text: str, limit: int) -> str:
+    """保留頭尾並明確標示截斷，適用於 section 與極長的最新輸入。"""
+    if len(text) <= limit:
+        return text
+    marker = "\n…（內容已截斷）…\n"
+    if limit <= len(marker):
+        return text[:limit]
+    remaining = limit - len(marker)
+    head = (remaining + 1) // 2
+    tail = remaining - head
+    return text[:head] + marker + (text[-tail:] if tail else "")
+
+
+def _compose_with_budget(
+    sections: list[tuple[int, int, int, str]],
+    user_section: str,
+    max_length: int,
+) -> str:
+    """依優先級分配 Prompt 空間，並保證最新輸入位於結尾。"""
+    max_length = max(1, max_length)
+    if len(user_section) >= max_length:
+        return _truncate(user_section, max_length)
+
+    separator_length = 2
+    available = max_length - len(user_section) - separator_length
+    selected: list[tuple[int, str]] = []
+
+    for _priority, order, section_limit, text in sorted(sections):
+        if available <= 0:
+            break
+        # 另外預留 section 之間的空行；首個 section 不需要預留。
+        separator_cost = separator_length if selected else 0
+        if available <= separator_cost:
+            break
+        allowed = min(section_limit, available - separator_cost)
+        fitted = _truncate(text, allowed)
+        if not fitted:
+            continue
+        selected.append((order, fitted))
+        available -= len(fitted) + separator_cost
+
+    selected.sort(key=lambda item: item[0])
+    prefix = "\n\n".join(text for _, text in selected)
+    return f"{prefix}\n\n{user_section}" if prefix else user_section

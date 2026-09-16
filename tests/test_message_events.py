@@ -6,6 +6,8 @@ Modification():
 - 新增 `$` 前綴指令重複執行的回歸測試。
 - 驗證 Messenger 不會再對伺服器訊息呼叫 bot.process_commands()。
 - 驗證 Owner 回覆橋接會依轉發映射送回原私訊者。
+- Owner 回覆橋接測試固定 utils.owner_resolver.config.OWNER_ID，
+  避免讀到本機真實 .env 造成測試替身 ID 不一致。
 
 Description():
 
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from cogs.events.message import Messenger
 
@@ -90,7 +93,8 @@ def test_owner_reply_bridge_forwards_to_original_sender() -> None:
         reference=SimpleNamespace(message_id=123),
     )
 
-    handled = asyncio.run(cog._handle_owner_reply(message))
+    with patch("utils.owner_resolver.config.OWNER_ID", bot.owner.id):
+        handled = asyncio.run(cog._handle_owner_reply(message))
 
     assert handled is True
     assert bot.recipient.sent == ["**Bot 回覆：**\n收到，我來處理"]
