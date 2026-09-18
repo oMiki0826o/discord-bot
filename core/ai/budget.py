@@ -231,8 +231,9 @@ def get_global_stats(hours: int = 24) -> dict:
         "total_tokens":   int,
         "active_users":   int,
         "by_model":       {model: {"requests": int, "tokens": int}, ...},
-        "error_count":    int,
-        "error_rate":     float,    # 0.0 ~ 1.0
+        "error_count":          int,  # 使用者請求最終失敗數
+        "provider_error_count": int,  # 模型嘗試層的 429/5xx/timeout 等
+        "error_rate":           float,  # 0.0 ~ 1.0
         "cache_hits":     int,      # 從 search_cache 計
     }
     """
@@ -251,9 +252,18 @@ def get_global_stats(hours: int = 24) -> dict:
     rows = c.fetchall()
 
     c.execute(
-        "SELECT COUNT(*) FROM error_log WHERE created_at >= ?", (since,),
+        """
+        SELECT
+            SUM(CASE WHEN error_type = 'give_up' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN error_type <> 'give_up' THEN 1 ELSE 0 END)
+        FROM error_log
+        WHERE created_at >= ?
+        """,
+        (since,),
     )
-    err_count = c.fetchone()[0]
+    error_row = c.fetchone()
+    err_count = int(error_row[0] or 0)
+    provider_err_count = int(error_row[1] or 0)
 
     # 快取命中數（若 search_cache 表存在）
     cache_hits = 0
@@ -301,6 +311,7 @@ def get_global_stats(hours: int = 24) -> dict:
         "active_users":    active_users,
         "by_model":        by_model,
         "error_count":     err_count,
+        "provider_error_count": provider_err_count,
         "error_rate":      error_rate,
         "cache_hits":      cache_hits,
         "estimated_ratio": estimated_ratio,
@@ -312,7 +323,9 @@ def get_total_memory_count() -> int:
     try:
         conn  = get_connection()
         c     = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM memories")
+        c.execute(
+            "SELECT COUNT(*) FROM memories WHERE status IN ('active', 'provisional')"
+        )
         count = c.fetchone()[0]
         conn.close()
         return count

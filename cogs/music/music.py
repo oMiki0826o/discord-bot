@@ -3,7 +3,8 @@ cogs/music/music.py
 
 職責：
 - 音樂播放的全部 Slash Commands 與事件監聽
-- /play /queue /clear /history /leave
+- /play：快速播放，預設單曲
+- /music：所有其他音樂功能的下拉式面板
 - $musicstatus owner only prefix 指令
 
 Modification():
@@ -15,8 +16,8 @@ Modification():
   skip / pause / resume / stop / loop / shuffle / nowplaying /
   volume / remove / move 等 Slash 入口
 - /musicstatus 改為 owner only prefix $musicstatus
-- 補回 /leave，提供獨立入口讓 Bot 離開目前語音頻道
-- /playlist 併入 /play，統一使用 /play <mode> <url>
+- /queue /clear /history /leave 與 /favorite 收旂至 /music 面板
+- /playlist 併入 /play，統一使用 /play <url> [mode]
 
 """
 
@@ -129,13 +130,18 @@ class Music(commands.Cog):
 
     # ── /play ──────────────────────
 
-    @app_commands.command(name="play", description="播放 YouTube 單曲或歌單")
-    @app_commands.describe(url="YouTube 單曲或播放清單 URL", mode="URL 類型，預設為單曲")
+    @app_commands.command(name="play", description="播放 YouTube 單曲（歌單需手動選擇）")
+    @app_commands.describe(url="YouTube 單曲或播放清單 URL", mode="URL 類型，未選擇時預設為單曲")
     @app_commands.choices(mode=[
         app_commands.Choice(name="單曲", value="song"),
         app_commands.Choice(name="歌單", value="playlist"),
     ])
-    async def cmd_play(self, interaction: discord.Interaction, mode: str, url: str) -> None:
+    async def cmd_play(
+        self,
+        interaction: discord.Interaction,
+        url: str,
+        mode: str = "song",
+    ) -> None:
         channel = await self._check_voice(interaction)
         if not channel:
             return
@@ -190,60 +196,22 @@ class Music(commands.Cog):
 
     # ── /queue ──────────────────────
 
-    @app_commands.command(name="queue", description="查看播放佇列（支援翻頁）")
-    async def cmd_queue(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message(embed=error_embed("此指令僅限伺服器使用"), ephemeral=True)
-            return
+    @app_commands.command(name="music", description="開啟音樂功能面板")
+    @app_commands.guild_only()
+    async def cmd_music(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
         player = get_player(self.bot, interaction.guild)
         await interaction.response.send_message(
-            embed=queue_embed(player.queue, page=1),
-            view=QueueView(player),
+            embed=_music_panel_embed(player),
+            view=MusicPanelView(self, interaction.user.id),
+            ephemeral=True,
         )
 
     # ── /clear ──────────────────────
 
-    @app_commands.command(name="clear", description="清空整個播放佇列")
-    async def cmd_clear(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message(embed=error_embed("此指令僅限伺服器使用"), ephemeral=True)
-            return
-        player = get_player(self.bot, interaction.guild)
-        if not await require_player_control(interaction, player):
-            return
-        player.queue.clear()
-        await interaction.response.send_message(embed=success_embed("播放佇列已清空"))
-
     # ── /history ──────────────────────
 
-    @app_commands.command(name="history", description="查看最近播放記錄（最多 10 首）")
-    async def cmd_history(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message(embed=error_embed("此指令僅限伺服器使用"), ephemeral=True)
-            return
-        player = get_player(self.bot, interaction.guild)
-        await interaction.response.send_message(embed=history_embed(player.queue))
-
     # ── /leave ──────────────────────
-
-    @app_commands.command(name="leave", description="讓 Bot 離開目前語音頻道")
-    async def cmd_leave(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message(embed=error_embed("此指令僅限伺服器使用"), ephemeral=True)
-            return
-
-        player = get_player(self.bot, interaction.guild)
-        if not player.is_connected:
-            await interaction.response.send_message(
-                embed=error_embed("Bot 目前不在語音頻道中"),
-                ephemeral=True,
-            )
-            return
-        if not await require_player_control(interaction, player):
-            return
-
-        await player.disconnect()
-        await interaction.response.send_message(embed=success_embed("已離開語音頻道"))
 
     # ── $musicstatus ──────────────────────
 
@@ -301,6 +269,138 @@ class Music(commands.Cog):
 
 
 # ── extension 進入點 ──────────────────────
+
+def _music_panel_embed(player) -> discord.Embed:
+    current = player.current_song
+    status = f"正在播放：**{current.title}**" if current else "目前沒有播放中的音樂"
+    embed = info_embed(
+        f"{status}\n待播佇列：**{player.queue.size}** 首\n\n"
+        "請從下方選單選擇要使用的功能。"
+    )
+    embed.title = "音樂面板"
+    return embed
+
+
+class FavoriteAddModal(discord.ui.Modal, title="加入最愛歌曲"):
+    url = discord.ui.TextInput(
+        label="YouTube 單曲 URL",
+        placeholder="https://www.youtube.com/watch?v=...",
+        required=True,
+        max_length=500,
+    )
+
+    def __init__(self, bot: commands.Bot) -> None:
+        super().__init__()
+        self.bot = bot
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        favorites = self.bot.get_cog("Favorites")
+        if favorites is None:
+            await interaction.response.send_message(
+                embed=error_embed("收藏功能尚未載入，請稍後再試"), ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        await favorites.add_by_query(interaction, interaction.user, self.url.value)
+
+
+class MusicPanelSelect(discord.ui.Select):
+    def __init__(self, cog: Music) -> None:
+        self.cog = cog
+        super().__init__(
+            placeholder="選擇音樂功能",
+            options=[
+                discord.SelectOption(label="目前播放與控制", value="now_playing", emoji="⏯️"),
+                discord.SelectOption(label="播放佇列", value="queue", emoji="📜"),
+                discord.SelectOption(label="播放記錄", value="history", emoji="🕘"),
+                discord.SelectOption(label="我的最愛歌單", value="favorites", emoji="⭐"),
+                discord.SelectOption(label="加入最愛歌曲", value="favorite_add", emoji="➕"),
+                discord.SelectOption(label="清空播放佇列", value="clear", emoji="🧹"),
+                discord.SelectOption(label="離開語音頻道", value="leave", emoji="👋"),
+                discord.SelectOption(label="重新整理面板", value="refresh", emoji="🔄"),
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        player = get_player(self.cog.bot, interaction.guild)
+        action = self.values[0]
+
+        if action == "refresh":
+            await interaction.response.edit_message(embed=_music_panel_embed(player), view=self.view)
+            return
+        if action == "favorite_add":
+            await interaction.response.send_modal(FavoriteAddModal(self.cog.bot))
+            return
+        if action == "favorites":
+            from cogs.utility.favorites import FavoriteListView, _fav_embed
+            import database.repository.favorites_repository as fav_repo
+
+            favorites_cog = self.cog.bot.get_cog("Favorites")
+            if favorites_cog is None:
+                await interaction.response.send_message(
+                    embed=error_embed("收藏功能尚未載入，請稍後再試"), ephemeral=True,
+                )
+                return
+            favorites = await fav_repo.get_favorites(str(interaction.user.id))
+            await interaction.response.send_message(
+                embed=_fav_embed(interaction.user, favorites, 1),
+                view=FavoriteListView(favorites_cog, interaction.user, favorites) if favorites else None,
+                ephemeral=True,
+            )
+            return
+        if action == "queue":
+            await interaction.response.send_message(
+                embed=queue_embed(player.queue, page=1),
+                view=QueueView(player),
+                ephemeral=True,
+            )
+            return
+        if action == "history":
+            await interaction.response.send_message(embed=history_embed(player.queue), ephemeral=True)
+            return
+        if action == "now_playing":
+            if player.current_song is None:
+                await interaction.response.send_message(
+                    embed=error_embed("目前沒有播放中的音樂"), ephemeral=True,
+                )
+                return
+            await interaction.response.send_message(
+                embed=now_playing_embed(player.current_song, player.queue),
+                view=MusicControls(player),
+                ephemeral=True,
+            )
+            return
+        if action == "clear":
+            if not await require_player_control(interaction, player):
+                return
+            player.queue.clear()
+            await interaction.response.send_message(embed=success_embed("播放佇列已清空"), ephemeral=True)
+            return
+
+        if not player.is_connected:
+            await interaction.response.send_message(
+                embed=error_embed("Bot 目前不在語音頻道中"), ephemeral=True,
+            )
+            return
+        if not await require_player_control(interaction, player):
+            return
+        await player.disconnect()
+        await interaction.response.send_message(embed=success_embed("已離開語音頻道"), ephemeral=True)
+
+
+class MusicPanelView(discord.ui.View):
+    def __init__(self, cog: Music, user_id: int) -> None:
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.add_item(MusicPanelSelect(cog))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message("這不是你的音樂面板。", ephemeral=True)
+        return False
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Music(bot))

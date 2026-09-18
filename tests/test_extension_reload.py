@@ -3,7 +3,12 @@
 from discord.ext import commands
 
 import core.music.queue as queue_module
-from cogs.system.load import _core_import_error, _music_core_restart_reasons
+import utils.confirmation as confirmation_module
+from cogs.system.load import (
+    _core_import_error,
+    _music_core_restart_reasons,
+    _reload_shared_dependencies,
+)
 from core.system.extension_loader import _collect_modules
 
 
@@ -30,3 +35,12 @@ def test_core_import_error_unwraps_extension_failure():
     wrapped = commands.ExtensionFailed("cogs.music.music", root)
 
     assert _core_import_error(wrapped) == str(root)
+
+
+def test_shared_dependency_reload_restores_new_confirmation_api(monkeypatch):
+    monkeypatch.delattr(confirmation_module, "guarded_action")
+
+    reloaded = _reload_shared_dependencies()
+
+    assert reloaded == ["utils.confirmation"]
+    assert hasattr(confirmation_module, "guarded_action")

@@ -137,3 +137,8 @@ class WebhookSender(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(WebhookSender(bot))
+
+
+# /webhook 已整合進 /say 面板；保留 Command 物件作為共用發送實作，
+# 但不再將它註冊為獨立的 Slash Command。
+WebhookSender.__cog_app_commands__ = []

@@ -72,20 +72,23 @@ class EmbedBuilder(commands.Cog):
         image_url:   str | None = None,
         message_id:  str | None = None,
     ) -> None:
+        # 讀取引用訊息或送出 Embed 可能超過 Discord 的 3 秒互動期限，
+        # 一開始先確認互動，後續一律使用 followup 回覆狀態。
+        await interaction.response.defer(ephemeral=True)
         channel   = interaction.channel
         reference = await _fetch_reference(channel, message_id)
 
         # 顏色解析
         embed_color = discord.Color.blue()
+        color_warning = ""
         if color:
             try:
                 embed_color = discord.Color.from_str(color)
             except ValueError:
-                await interaction.response.send_message(
-                    f"無效的顏色 `{color}`，使用預設藍色。（範例：`#FF5733` 或 `red`）",
-                    ephemeral=True,
+                color_warning = (
+                    f"\n無效的顏色 `{color}`，已使用預設藍色。"
+                    "（範例：`#FF5733` 或 `red`）"
                 )
-                # 不 return，繼續用預設顏色發送
 
         embed = discord.Embed(
             title       = title,
@@ -103,17 +106,15 @@ class EmbedBuilder(commands.Cog):
 
         try:
             await channel.send(embed=embed, reference=reference)
-            # 若已透過顏色錯誤回應，改用 followup
-            try:
-                await interaction.response.send_message("已發送。", ephemeral=True)
-            except discord.InteractionResponded:
-                await interaction.followup.send("已發送。", ephemeral=True)
+            await interaction.followup.send(f"已發送。{color_warning}", ephemeral=True)
         except Exception as e:
-            try:
-                await interaction.response.send_message(f"錯誤：```{e}```", ephemeral=True)
-            except discord.InteractionResponded:
-                await interaction.followup.send(f"錯誤：```{e}```", ephemeral=True)
+            await interaction.followup.send(f"錯誤：```{e}```", ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(EmbedBuilder(bot))
+
+
+# /embed 已整合進 /say 面板；保留 Command 物件作為共用發送實作，
+# 但不再將它註冊為獨立的 Slash Command。
+EmbedBuilder.__cog_app_commands__ = []

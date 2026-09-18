@@ -83,9 +83,11 @@ class Monitor(commands.Cog):
                 self._alert_active = True
                 logger.error(
                     "[monitor] 過去 1 小時錯誤率 %.1f%% 超過閾值 %.1f%%"
-                    "（請求 %d 次，錯誤 %d 次，活躍使用者 %d 人）",
+                    "（成功 %d 次，最終失敗 %d 次，供應商異常 %d 次，"
+                    "活躍使用者 %d 人）",
                     error_rate * 100, threshold * 100,
                     stats["total_requests"], stats["error_count"],
+                    stats["provider_error_count"],
                     stats["active_users"],
                 )
         else:

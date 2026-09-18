@@ -14,10 +14,10 @@ def test_say_is_guild_only_and_has_runtime_checks() -> None:
     assert len(command.checks) == 2
 
 
-def test_say_labels_message_with_user_id_and_limits_mass_mentions() -> None:
+def test_say_labels_message_with_bold_display_name_and_limits_mass_mentions() -> None:
     bot = MagicMock()
     cog = Say(bot)
-    user = SimpleNamespace(id=123456789)
+    user = SimpleNamespace(id=123456789, display_name="幽月控")
     bot_member = object()
     permissions = SimpleNamespace(
         attach_files=True,
@@ -39,7 +39,7 @@ def test_say_labels_message_with_user_id_and_limits_mass_mentions() -> None:
 
     channel.send.assert_awaited_once()
     args, kwargs = channel.send.await_args
-    assert args[0] == "「123456789」説：hello @everyone"
+    assert args[0] == "**幽月控**說：hello @everyone"
     assert kwargs["allowed_mentions"].to_dict() == {
         "replied_user": True,
         "parse": ["users"],

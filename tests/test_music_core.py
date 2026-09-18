@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 import core.music.queue as queue_module
 import core.music.views as views_module
+import cogs.utility.favorites as favorites_module
+from cogs.utility.favorites import Favorites
 from core.music.player import GuildPlayer
 from core.music.queue import MusicQueue, QueueFullError
 from core.music.song import Song
@@ -89,6 +92,24 @@ def test_player_disconnect_does_not_cancel_calling_background_task():
     asyncio.run(run("_watchdog_task"))
 
 
+def test_idle_disconnect_announces_before_leaving(monkeypatch):
+    player = GuildPlayer(SimpleNamespace(), SimpleNamespace(name="test guild"))
+    player.text_channel = SimpleNamespace(send=AsyncMock())
+    player.disconnect = AsyncMock()
+
+    monkeypatch.setattr("core.music.player.asyncio.sleep", AsyncMock())
+    monkeypatch.setattr("core.music.player.get_int", lambda *_: 180)
+    monkeypatch.setattr(
+        "core.music.player.get",
+        lambda *_: "超過三分鐘沒事了，我先溜了 👋",
+    )
+
+    asyncio.run(player._idle_disconnect())
+
+    player.text_channel.send.assert_awaited_once_with("超過三分鐘沒事了，我先溜了 👋")
+    player.disconnect.assert_awaited_once()
+
+
 def test_playlist_only_fills_remaining_queue_capacity(monkeypatch):
     monkeypatch.setattr(queue_module, "get_int", lambda *_: 3)
     player = GuildPlayer(SimpleNamespace(), SimpleNamespace())
@@ -128,3 +149,37 @@ def test_player_control_requires_same_channel_or_admin(monkeypatch):
     assert views_module.can_control_player(same_channel, player)
     assert not views_module.can_control_player(other_channel, player)
     assert views_module.can_control_player(administrator, player)
+
+
+def test_first_favorite_song_sends_public_now_playing(monkeypatch):
+    song = _song("favorite")
+    queue = MusicQueue()
+    player = SimpleNamespace(
+        is_active=False,
+        queue=queue,
+        connect=AsyncMock(),
+        add_song=AsyncMock(return_value=song),
+    )
+    channel = SimpleNamespace(send=AsyncMock())
+    interaction = SimpleNamespace(channel=channel)
+    member = SimpleNamespace(
+        id=123,
+        guild=SimpleNamespace(id=456),
+        voice=SimpleNamespace(channel=SimpleNamespace(id=789)),
+    )
+
+    async def fake_favorite(user_id, index):
+        return [], {"url": song.webpage_url}
+
+    monkeypatch.setattr(favorites_module, "get_player", lambda *_: player)
+    monkeypatch.setattr(favorites_module, "_get_favorite_at", fake_favorite)
+
+    async def run():
+        return await Favorites(SimpleNamespace()).play_favorite_core(interaction, member, 0)
+
+    embed, view = asyncio.run(run())
+
+    channel.send.assert_awaited_once()
+    assert channel.send.await_args.kwargs["embed"].title == "正在播放"
+    assert "公開通知已發送" in embed.description
+    assert view is None

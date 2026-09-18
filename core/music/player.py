@@ -336,6 +336,16 @@ class GuildPlayer:
         timeout = get_int("music.idle_timeout_seconds", 180)
         await asyncio.sleep(timeout)
         log.info("[%s] 閒置 %ds，自動斷線", self.guild.name, timeout)
+
+        message = str(
+            get("music.idle_disconnect_message", "超過三分鐘沒事了，我先溜了 👋")
+        ).strip()
+        if message and self.text_channel:
+            try:
+                await self.text_channel.send(message)
+            except discord.HTTPException as exc:
+                log.warning("[%s] 無法發送閒置離開通知：%s", self.guild.name, exc)
+
         await self.disconnect()
 
     # ── 語音健康監控 ──────────────────────

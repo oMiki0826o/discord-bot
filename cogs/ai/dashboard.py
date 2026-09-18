@@ -95,7 +95,7 @@ class Dashboard(commands.Cog):
     @commands.is_owner()
     async def cmd_dashboard(self, ctx: commands.Context) -> None:
         """$dashboard — 系統總覽 embed"""
-        d = get_dashboard_data(self.bot)
+        d = await get_dashboard_data(self.bot)
 
         embed = discord.Embed(
             title     = "系統總覽 Dashboard",
@@ -116,7 +116,8 @@ class Dashboard(commands.Cog):
             name  = "錯誤 / 快取（24h）",
             value = (
                 f"錯誤率：**{d['error_rate'] * 100:.1f}%**\n"
-                f"錯誤次數：**{d['error_count']}**\n"
+                f"請求失敗：**{d['error_count']}**\n"
+                f"供應商異常：**{d['provider_error_count']}**\n"
                 f"快取命中：**{d['cache_hits']}** 次"
             ),
             inline=True,

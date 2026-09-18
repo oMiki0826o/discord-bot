@@ -18,6 +18,7 @@ Modification():
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 
 # ── 評分 ──────────────────────
@@ -46,6 +47,51 @@ def _as_importance(value: object) -> int:
     return max(1, min(5, importance))
 
 
+_TERM_RE = re.compile(r"[A-Za-z0-9_]+|[\u3400-\u4dbf\u4e00-\u9fff]+")
+
+
+def _terms(value: object) -> set[str]:
+    """將中英混合文字轉成可比對詞彙。
+
+    英數保留完整詞；中文使用雙字片語，避免舊版用空白切詞時
+    幾乎所有中文句子都得到零相關性。
+    """
+    terms: set[str] = set()
+    for raw in _TERM_RE.findall(_as_text(value).casefold()):
+        if raw.isascii():
+            terms.add(raw)
+            continue
+        if len(raw) == 1:
+            terms.add(raw)
+        else:
+            terms.update(raw[index:index + 2] for index in range(len(raw) - 1))
+    return terms
+
+
+def _relevance(query: object, text: object) -> int:
+    return len(_terms(query) & _terms(text))
+
+
+def relevance_score(query: object, text: object) -> int:
+    """公開的輕量相關性分數，供 Context 區塊篩選共用。"""
+    return _relevance(query, text)
+
+
+def is_relevant(query: object, text: object, *, min_overlap: int = 2) -> bool:
+    """
+    依資料內容判斷是否相關，不依賴主題關鍵字表。
+
+    極短查詢通常是實體名稱或主題詞，允許一個交集；較長問題
+    需要至少兩個交集，避免只因「Discord」之類廣泛詞彙就載入
+    整段無關專案。
+    """
+    query_terms = _terms(query)
+    if not query_terms:
+        return False
+    required = 1 if len(query_terms) <= 3 else max(2, min_overlap)
+    return len(query_terms & _terms(text)) >= required
+
+
 def _score(query: object, text: object, importance: object = 1) -> float:
     """
     詞彙交集分數 + importance 加權。
@@ -55,9 +101,7 @@ def _score(query: object, text: object, importance: object = 1) -> float:
     ── importance 以加法計入，不做乘法，
        避免完全不相關的高重要度記憶排名超過相關的低重要度記憶
     """
-    q = set(_as_text(query).lower().split())
-    t = set(_as_text(text).lower().split())
-    return len(q & t) * 2 + _as_importance(importance)
+    return _relevance(query, text) * 2 + _as_importance(importance)
 
 # ── 記憶排序 ──────────────────────
 
@@ -70,11 +114,16 @@ def rank_memories(
     輸入：[(keyword, content, importance), ...]
     回傳：同格式，依相關性降序，取前 limit 筆。
     """
-    scored = [
-        (_score(query, f"{_as_text(kw)} {_as_text(content)}", imp),
-         _as_text(kw), _as_text(content), _as_importance(imp))
-        for kw, content, imp in memories
-    ]
+    scored = []
+    for kw, content, imp in memories:
+        searchable = f"{_as_text(kw)} {_as_text(content)}"
+        relevance = _relevance(query, searchable)
+        if relevance <= 0:
+            continue
+        scored.append((
+            relevance * 2 + _as_importance(imp),
+            _as_text(kw), _as_text(content), _as_importance(imp),
+        ))
     scored.sort(reverse=True, key=lambda x: x[0])
     return [(kw, c, imp) for _, kw, c, imp in scored[:limit]]
 
@@ -92,6 +141,7 @@ def rank_messages(
     scored = [
         (_score(query, content), _as_text(role), _as_text(content))
         for role, content in messages
+        if _relevance(query, content) > 0
     ]
     scored.sort(reverse=True, key=lambda x: x[0])
     return [(role, content) for _, role, content in scored[:limit]]

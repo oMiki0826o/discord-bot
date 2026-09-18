@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -53,8 +54,9 @@ from core.ai.json_utils import strip_json_fence
 from core.ai.models import MODELS
 from core.ai.quota_manager import (
     background_request,
+    error_status_code,
     is_quota_error,
-    mark_quota_exhausted,
+    mark_quota_exhausted_from_error,
 )
 from utils.async_db import to_thread
 
@@ -82,12 +84,19 @@ STATE_LABELS: dict[str, str] = {
 _DEFAULT_TTL_MIN = 60
 _PROFILE_MODEL   = MODELS["lite"]
 _PROFILE_TIMEOUT = 10
-_PROFILE_SYSTEM  = (
-    "你是使用者偏好分析器。根據對話推斷使用者的偏好，只輸出 JSON，"
-    "無法判斷的欄位省略。格式：\n"
-    '{"topics":["話題"],"style":"正式/輕鬆/幽默","lang":"zh_tw","notes":"其他"}'
-)
+_PROFILE_SYSTEM  = """
+你是使用者偏好更新器，只能輸出合法 JSON。
+只記錄使用者明確指定的長期語言偏好與回答風格。
+不得記錄或推斷敏感屬性、秘密、地址、電話或私人資料；不記錄單次任務的暫時語氣、AI 回覆內容、引用他人的內容或角色扮演設定。
+只允許欄位：{"style":"正式/輕鬆/幽默/簡潔/詳細","lang":"zh_tw/en/其他明確語言"}
+無法確認的欄位必須省略；沒有可靠更新時輸出 {}，不得輸出 Markdown、前言或說明。
+""".strip()
 _profile_jobs_in_progress: set[str] = set()
+_PROFILE_CUE_RE = re.compile(
+    r"(?:以後|之後都|總是|固定).*(?:回答|回覆|使用).*(?:繁體|簡體|英文|中文|正式|輕鬆|簡潔|詳細)|"
+    r"我(?:偏好|習慣).*(?:語言|回答|回覆|風格)",
+    re.IGNORECASE,
+)
 
 
 # ── 資料結構 ──────────────────────
@@ -191,12 +200,16 @@ async def get_global_memories() -> list[tuple[str, str, int]]:
 async def set_global_memory(keyword: str, content: str, importance: int = 5) -> None:
     importance = max(1, min(5, importance))
     await repo.upsert_global_memory(keyword, content, importance)
+    from core.ai.memory_manager import clear_search_cache
+    clear_search_cache()
     logger.info("[global_memory] upsert keyword=%s", keyword)
 
 
 async def remove_global_memory(keyword: str) -> bool:
     ok = await repo.delete_global_memory(keyword)
     if ok:
+        from core.ai.memory_manager import clear_search_cache
+        clear_search_cache()
         logger.info("[global_memory] removed keyword=%s", keyword)
     return ok
 
@@ -280,6 +293,8 @@ async def profile_to_prompt(user_id: str) -> str:
         lines.append(f"- 常見話題：{', '.join(topics[:5])}")
     if style := profile.get("style"):
         lines.append(f"- 溝通風格：{style}")
+    if lang := profile.get("lang"):
+        lines.append(f"- 語言偏好：{lang}")
     if notes := profile.get("notes"):
         lines.append(f"- 備註：{notes}")
     return ("=== 使用者偏好 ===\n" + "\n".join(lines)) if lines else ""
@@ -295,8 +310,12 @@ async def update_profile_from_interaction(
 ) -> None:
     """
     背景執行：AI 分析對話更新 profile。
-    由 event_bus 觸發，任何例外靜默處理。
+    由 event_bus 觸發；例外會寫入日誌，不影響前景回應。
     """
+    # Profile 只負責跨頻道都安全的明確語言／回覆風格；話題、專案及
+    # 其他事實交由有 scope 與來源的長期記憶管理，避免兩套資料打架。
+    if not _PROFILE_CUE_RE.search(user_msg):
+        return
     if user_id in _profile_jobs_in_progress:
         logger.debug("[user_context] coalesced profile job user=%s", user_id)
         return
@@ -309,7 +328,11 @@ async def update_profile_from_interaction(
             res = await asyncio.wait_for(
                 client.aio.models.generate_content(
                     model    = _PROFILE_MODEL,
-                    contents = f"User: {user_msg[:500]}\nAI: {ai_msg[:500]}",
+                    contents = (
+                        f'<current_user_message author_id="{user_id}">\n'
+                        f"{user_msg[:1_000]}\n</current_user_message>\n\n"
+                        f"<assistant_response>\n{ai_msg[:1_000]}\n</assistant_response>"
+                    ),
                     config   = types.GenerateContentConfig(
                         system_instruction=_PROFILE_SYSTEM,
                     ),
@@ -326,24 +349,37 @@ async def update_profile_from_interaction(
             return
 
         existing = await get_profile(user_id)
-        for k, v in updates.items():
-            if k == "topics" and isinstance(v, list):
-                old = existing.get("topics", [])
-                existing["topics"] = list(dict.fromkeys(old + v))[:10]
-            else:
-                existing[k] = v
+        allowed_updates = {
+            key: value for key, value in updates.items()
+            if key in {"style", "lang"} and isinstance(value, str) and value.strip()
+        }
+        if not allowed_updates:
+            return
+        existing.update(allowed_updates)
 
         await repo.save_profile(user_id, username, existing)
         logger.debug(
             "[user_context] profile updated user=%s fields=%s",
-            user_id, list(updates),
+            user_id, list(allowed_updates),
         )
     except asyncio.TimeoutError:
-        logger.debug("[user_context] profile timeout user=%s", user_id)
+        logger.warning(
+            "[user_context] operation=profile status=timeout user=%s model=%s",
+            user_id, _PROFILE_MODEL,
+        )
     except Exception as e:
         if is_quota_error(e):
-            mark_quota_exhausted(_PROFILE_MODEL)
-        logger.debug("[user_context] profile error user=%s: %s", user_id, e)
+            retry_after = mark_quota_exhausted_from_error(_PROFILE_MODEL, e)
+            logger.warning(
+                "[user_context] operation=profile status=429 user=%s model=%s "
+                "retry_after=%ds error=%s",
+                user_id, _PROFILE_MODEL, retry_after, e,
+            )
+        else:
+            logger.exception(
+                "[user_context] operation=profile status=%s user=%s model=%s error=%s",
+                error_status_code(e) or "exception", user_id, _PROFILE_MODEL, e,
+            )
     finally:
         _profile_jobs_in_progress.discard(user_id)
 

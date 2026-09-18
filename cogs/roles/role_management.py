@@ -3,8 +3,8 @@ cogs/roles/role_management.py
 
 職責：
 - 提供身份組自助領取功能（Button Roles）
-- /roles panel — 管理員在指定頻道發送帶按鈕的身份組面板
-- /roles add / remove — 動態新增/移除面板上的身份組按鈕
+- /roles — 透過 action 選單建立、列出、修改或刪除身份組面板
+- 所有會修改公開面板的操作都需要二次確認
 - 使用 persistent Button View，Bot 重啟後仍可響應
 - 所有面板資料存入 SQLite，重啟後自動重建 View
 
@@ -41,6 +41,7 @@ from discord.ext import commands
 
 from database.ai.sqlite import get_connection
 from utils.discord_errors import friendly_http_error
+from utils.confirmation import guarded_action, missing_permissions, request_confirmation
 
 logger = logging.getLogger("bot.roles")
 
@@ -280,20 +281,88 @@ class RoleManagement(commands.Cog):
 
         logger.info("[roles] 已重建 %d 個身份組面板 View", count)
 
-    roles_group = app_commands.Group(
-        name="roles", description="身份組面板管理", guild_only=True,
-    )
+    @app_commands.command(name="roles", description="開啟身份組面板管理")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_roles=True)
+    @app_commands.checks.has_permissions(manage_roles=True)
+    async def cmd_roles(self, interaction: discord.Interaction) -> None:
+        embed = discord.Embed(
+            title="身份組面板管理",
+            description="請從下方選單建立、修改或刪除身份組面板。",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
+        )
+        await interaction.response.send_message(
+            embed=embed, view=RoleManagementView(self, interaction.user.id), ephemeral=True,
+        )
+
+    async def dispatch_action(
+        self,
+        interaction: discord.Interaction,
+        value: str,
+        message_id: str | None = None,
+        role: discord.Role | None = None,
+        title: app_commands.Range[str, 1, 100] = "身份組領取",
+        description: app_commands.Range[str, 0, 300] | None = None,
+        label: app_commands.Range[str, 1, 80] | None = None,
+        emoji: str | None = None,
+        style: str | None = None,
+    ) -> None:
+        user_perms = ("administrator",) if value == "delete" else ("manage_roles",)
+        bot_perms = {
+            "panel": ("send_messages", "embed_links", "manage_roles"),
+            "add": ("manage_roles",),
+            "remove": ("manage_roles",),
+        }.get(value, ())
+        if error := missing_permissions(interaction, user=user_perms, bot=bot_perms):
+            await interaction.response.send_message(error, ephemeral=True)
+            return
+
+        if value == "list":
+            await self.cmd_list(interaction)
+            return
+        if value == "panel":
+            await request_confirmation(
+                interaction,
+                title="確認建立身份組面板",
+                description=f"將在 {interaction.channel.mention} 建立公開面板「{title}」。",
+                action=guarded_action(
+                    lambda click: self.cmd_panel(
+                        click, title, description or "點擊下方按鈕以領取或移除身份組",
+                    ),
+                    user=("manage_roles",), bot=bot_perms,
+                ),
+            )
+            return
+        if not message_id:
+            await interaction.response.send_message("此操作必須填寫面板訊息 ID。", ephemeral=True)
+            return
+        if value in {"add", "remove"} and role is None:
+            await interaction.response.send_message("新增或移除時必須選擇身份組。", ephemeral=True)
+            return
+
+        if value == "add":
+            action_callback = lambda click: self.cmd_add(
+                click, message_id, role, label, emoji, (description or "")[:100],
+                style or "secondary",
+            )
+            summary = f"將 {role.mention} 加入面板 `{message_id}`。"
+        elif value == "remove":
+            action_callback = lambda click: self.cmd_remove(click, message_id, role)
+            summary = f"將 {role.mention} 從面板 `{message_id}` 移除。"
+        else:
+            action_callback = lambda click: self.cmd_delete(click, message_id)
+            summary = f"將刪除面板 `{message_id}` 及其訊息，此操作無法復原。"
+
+        await request_confirmation(
+            interaction,
+            title={"add": "確認新增身份組", "remove": "確認移除身份組", "delete": "確認刪除面板"}[value],
+            description=summary,
+            action=guarded_action(action_callback, user=user_perms, bot=bot_perms),
+        )
 
     # ── /roles panel ──────────────────────
 
-    @roles_group.command(name="panel", description="建立新的身份組面板")
-    @app_commands.describe(
-        title       = "面板標題（最多 100 字元）",
-        description = "面板說明（最多 300 字元）",
-    )
-    @app_commands.default_permissions(manage_roles=True)
-    @app_commands.checks.has_permissions(manage_roles=True)
-    @app_commands.checks.bot_has_permissions(send_messages=True, embed_links=True, manage_roles=True)
     async def cmd_panel(
         self,
         interaction: discord.Interaction,
@@ -320,30 +389,12 @@ class RoleManagement(commands.Cog):
         )
 
         await interaction.response.send_message(
-            f"面板已建立（訊息 ID：`{msg.id}`）\n使用 `/roles add {msg.id} @身份組` 新增按鈕",
+            f"面板已建立（訊息 ID：`{msg.id}`）\n再次使用 `/roles` 並選擇「新增身份組」即可加入按鈕。",
             ephemeral=True,
         )
 
     # ── /roles add ──────────────────────
 
-    @roles_group.command(name="add", description="新增身份組到指定面板")
-    @app_commands.describe(
-        message_id  = "面板訊息 ID",
-        role        = "要新增的身份組",
-        label       = "按鈕文字（預設使用身份組名稱，最多 80 字元）",
-        emoji       = "按鈕表情符號（選填）",
-        description = "身份組說明（顯示在 embed 列表，最多 100 字元）",
-        style       = "按鈕樣式",
-    )
-    @app_commands.choices(style=[
-        app_commands.Choice(name="藍色（primary）",   value="primary"),
-        app_commands.Choice(name="灰色（secondary）", value="secondary"),
-        app_commands.Choice(name="綠色（success）",   value="success"),
-        app_commands.Choice(name="紅色（danger）",    value="danger"),
-    ])
-    @app_commands.default_permissions(manage_roles=True)
-    @app_commands.checks.has_permissions(manage_roles=True)
-    @app_commands.checks.bot_has_permissions(manage_roles=True)
     async def cmd_add(
         self,
         interaction: discord.Interaction,
@@ -431,11 +482,6 @@ class RoleManagement(commands.Cog):
 
     # ── /roles remove ──────────────────────
 
-    @roles_group.command(name="remove", description="從面板移除指定身份組按鈕")
-    @app_commands.describe(message_id="面板訊息 ID", role="要移除的身份組")
-    @app_commands.default_permissions(manage_roles=True)
-    @app_commands.checks.has_permissions(manage_roles=True)
-    @app_commands.checks.bot_has_permissions(manage_roles=True)
     async def cmd_remove(
         self,
         interaction: discord.Interaction,
@@ -490,10 +536,6 @@ class RoleManagement(commands.Cog):
 
     # ── /roles delete ──────────────────────
 
-    @roles_group.command(name="delete", description="刪除整個身份組面板（會刪除面板訊息）")
-    @app_commands.describe(message_id="面板訊息 ID")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
     async def cmd_delete(
         self,
         interaction: discord.Interaction,
@@ -523,9 +565,6 @@ class RoleManagement(commands.Cog):
 
     # ── /roles list ──────────────────────
 
-    @roles_group.command(name="list", description="列出伺服器所有身份組面板")
-    @app_commands.default_permissions(manage_roles=True)
-    @app_commands.checks.has_permissions(manage_roles=True)
     async def cmd_list(self, interaction: discord.Interaction) -> None:
         panels = _get_panels(interaction.guild.id)
 
@@ -536,7 +575,7 @@ class RoleManagement(commands.Cog):
         )
 
         if not panels:
-            embed.description = "目前無任何身份組面板\n使用 `/roles panel` 建立第一個"
+            embed.description = "目前無任何身份組面板\n使用 `/roles` 並選擇「建立面板」建立第一個"
         else:
             lines = [
                 f"**{p['title']}** — {len(p['roles'])} 個身份組\n"
@@ -549,6 +588,103 @@ class RoleManagement(commands.Cog):
 
 
 # ── extension 進入點 ──────────────────────
+
+class RoleManagementSelect(discord.ui.Select):
+    def __init__(self, cog: RoleManagement) -> None:
+        self.cog = cog
+        super().__init__(placeholder="選擇身份組面板操作", options=[
+            discord.SelectOption(label="建立面板", value="panel"),
+            discord.SelectOption(label="新增身份組", value="add"),
+            discord.SelectOption(label="移除身份組", value="remove"),
+            discord.SelectOption(label="刪除面板", value="delete"),
+            discord.SelectOption(label="列出面板", value="list"),
+        ])
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        action = self.values[0]
+        if action == "list":
+            await self.cog.dispatch_action(interaction, action)
+        elif action in {"add", "remove"}:
+            await interaction.response.send_message(
+                "請選擇要操作的身份組：",
+                view=RoleTargetView(self.cog, action, interaction.user.id), ephemeral=True,
+            )
+        else:
+            await interaction.response.send_modal(RoleManagementModal(self.cog, action))
+
+
+class RoleManagementView(discord.ui.View):
+    def __init__(self, cog: RoleManagement, user_id: int) -> None:
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.add_item(RoleManagementSelect(cog))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message("這不是你的身份組管理面板。", ephemeral=True)
+        return False
+
+
+class RoleTargetSelect(discord.ui.RoleSelect):
+    def __init__(self, cog: RoleManagement, action: str) -> None:
+        super().__init__(placeholder="選擇一個身份組", min_values=1, max_values=1)
+        self.cog, self.action = cog, action
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(RoleManagementModal(self.cog, self.action, self.values[0]))
+
+
+class RoleTargetView(discord.ui.View):
+    def __init__(self, cog: RoleManagement, action: str, user_id: int) -> None:
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.add_item(RoleTargetSelect(cog, action))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message("這不是你的身份組管理面板。", ephemeral=True)
+        return False
+
+
+class RoleManagementModal(discord.ui.Modal):
+    def __init__(self, cog: RoleManagement, action: str, role: discord.Role | None = None) -> None:
+        titles = {"panel": "建立身份組面板", "add": "新增身份組", "remove": "移除身份組", "delete": "刪除身份組面板"}
+        super().__init__(title=titles[action])
+        self.cog, self.action, self.role = cog, action, role
+        self.inputs: dict[str, discord.ui.TextInput] = {}
+
+        def add(key: str, label: str, **kwargs: object) -> None:
+            item = discord.ui.TextInput(label=label, **kwargs)
+            self.inputs[key] = item
+            self.add_item(item)
+
+        if action == "panel":
+            add("title", "面板標題", default="身份組領取", max_length=100)
+            add("description", "面板說明", default="點擊下方按鈕以領取或移除身份組", max_length=300, style=discord.TextStyle.paragraph)
+        else:
+            add("message_id", "面板訊息 ID", max_length=20)
+            if action == "add":
+                add("label", "按鈕文字（選填）", required=False, max_length=80)
+                add("emoji", "表情符號（選填）", required=False, max_length=100)
+                add("description", "身份組說明（選填）", required=False, max_length=100)
+                add("style", "樣式：primary/secondary/success/danger", default="secondary", max_length=9)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        def value(key: str) -> str | None:
+            return str(self.inputs[key].value).strip() if key in self.inputs else None
+
+        style = value("style")
+        if style and style not in {"primary", "secondary", "success", "danger"}:
+            await interaction.response.send_message("按鈕樣式必須是 primary、secondary、success 或 danger。", ephemeral=True)
+            return
+        await self.cog.dispatch_action(
+            interaction, self.action, message_id=value("message_id"), role=self.role,
+            title=value("title") or "身份組領取", description=value("description"),
+            label=value("label"), emoji=value("emoji"), style=style,
+        )
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(RoleManagement(bot))

@@ -25,6 +25,7 @@ from discord.ext import commands
 
 import database.repository.guild_repository as guild_repo
 from core.system.settings import get
+from utils.confirmation import guarded_action, missing_permissions, request_confirmation
 
 logger = logging.getLogger("bot.guild_settings")
 
@@ -130,77 +131,8 @@ class GuildSettings(commands.Cog):
             except discord.HTTPException:
                 pass
 
-    # ── Slash Commands ──────────────────────
-
-    server_group = app_commands.Group(
-        name="server", description="伺服器設定管理", guild_only=True,
-    )
-
-    @server_group.command(name="welcome", description="設定歡迎頻道")
-    @app_commands.describe(channel="歡迎頻道")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
-    async def cmd_welcome(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
-        await guild_repo.set_setting(interaction.guild.id, "welcome_channel_id", channel.id)
-        await interaction.response.send_message(f"歡迎頻道已設定為 {channel.mention}", ephemeral=True)
-
-    @server_group.command(name="leave", description="設定離開訊息頻道")
-    @app_commands.describe(channel="離開訊息頻道")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
-    async def cmd_leave(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
-        await guild_repo.set_setting(interaction.guild.id, "leave_channel_id", channel.id)
-        await interaction.response.send_message(f"離開訊息頻道已設定為 {channel.mention}", ephemeral=True)
-
-    @server_group.command(name="log", description="設定日誌頻道")
-    @app_commands.describe(channel="日誌頻道")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
-    async def cmd_log(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
-        await guild_repo.set_setting(interaction.guild.id, "log_channel_id", channel.id)
-        await interaction.response.send_message(f"日誌頻道已設定為 {channel.mention}", ephemeral=True)
-
-    @server_group.command(name="autorole", description="設定新成員自動身份組（留空停用）")
-    @app_commands.describe(role="自動身份組")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
-    async def cmd_autorole(self, interaction: discord.Interaction, role: discord.Role | None = None) -> None:
-        if role and (role.is_default() or role.managed or role >= interaction.guild.me.top_role):
-            await interaction.response.send_message(
-                "無法設定預設、整合管理或不低於 Bot 的身份組。",
-                ephemeral=True,
-            )
-            return
-        await guild_repo.set_setting(interaction.guild.id, "auto_role_id", role.id if role else 0)
-        msg = f"自動身份組已設定為 {role.mention}" if role else "自動身份組已停用"
-        await interaction.response.send_message(msg, ephemeral=True)
-
-    @server_group.command(name="ticket_category", description="設定工單類別")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
-    async def cmd_ticket_category(self, interaction: discord.Interaction, category: discord.CategoryChannel) -> None:
-        await guild_repo.set_setting(interaction.guild.id, "ticket_category_id", category.id)
-        await interaction.response.send_message(f"工單類別已設定為 **{category.name}**", ephemeral=True)
-
-    @server_group.command(name="ticket_support", description="設定工單支援身份組（留空停用）")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
-    async def cmd_ticket_support(self, interaction: discord.Interaction, role: discord.Role | None = None) -> None:
-        if role and role.is_default():
-            await interaction.response.send_message(
-                "不能將 @everyone 設為工單支援身份組。", ephemeral=True,
-            )
-            return
-        await guild_repo.set_setting(interaction.guild.id, "ticket_support_role", role.id if role else 0)
-        msg = f"工單支援身份組已設定為 {role.mention}" if role else "工單支援身份組已停用"
-        await interaction.response.send_message(msg, ephemeral=True)
-
-    @server_group.command(name="info", description="查看目前的伺服器設定")
-    @app_commands.default_permissions(manage_guild=True)
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def cmd_info(self, interaction: discord.Interaction) -> None:
-        settings = await guild_repo.get_settings(interaction.guild.id)
-        guild    = interaction.guild
+    async def _settings_embed(self, guild: discord.Guild) -> discord.Embed:
+        settings = await guild_repo.get_settings(guild.id)
 
         def ch_m(ch_id: int) -> str:
             if not ch_id: return "未設定"
@@ -242,15 +174,181 @@ class GuildSettings(commands.Cog):
             inline=False,
         )
         embed.set_footer(text=get("embed_footer.default", "Firefly Bot"))
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        embed.description = "使用下方選單修改設定；所有操作只對目前伺服器生效。"
+        return embed
 
-    @server_group.command(name="reset", description="重置所有伺服器設定為預設值")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
-    async def cmd_reset(self, interaction: discord.Interaction) -> None:
+    async def _set_channel(
+        self,
+        interaction: discord.Interaction,
+        key: str,
+        channel: discord.abc.GuildChannel | None,
+        label: str,
+    ) -> None:
+        if error := missing_permissions(interaction, user=("administrator",)):
+            await interaction.response.send_message(error, ephemeral=True)
+            return
+        await guild_repo.set_setting(interaction.guild.id, key, channel.id if channel else 0)
+        if channel is None:
+            message = f"{label}已停用"
+        else:
+            shown = channel.mention if hasattr(channel, "mention") else f"**{channel.name}**"
+            message = f"{label}已設定為 {shown}"
+        await interaction.response.send_message(message, ephemeral=True)
+
+    async def _set_role(
+        self,
+        interaction: discord.Interaction,
+        key: str,
+        role: discord.Role | None,
+        label: str,
+    ) -> None:
+        if error := missing_permissions(interaction, user=("administrator",)):
+            await interaction.response.send_message(error, ephemeral=True)
+            return
+        if role is not None:
+            invalid = role.is_default()
+            if key == "auto_role_id":
+                invalid = invalid or role.managed or role >= interaction.guild.me.top_role
+            if invalid:
+                await interaction.response.send_message("此身份組無法用於這項設定。", ephemeral=True)
+                return
+        await guild_repo.set_setting(interaction.guild.id, key, role.id if role else 0)
+        message = f"{label}已設定為 {role.mention}" if role else f"{label}已停用"
+        await interaction.response.send_message(message, ephemeral=True)
+
+    async def _reset_settings(self, interaction: discord.Interaction) -> None:
         await guild_repo.reset_settings(interaction.guild.id)
         await guild_repo.get_settings(interaction.guild.id)
         await interaction.response.send_message("伺服器設定已重置為預設值", ephemeral=True)
+
+    @app_commands.command(name="server", description="開啟伺服器設定面板")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def cmd_server(self, interaction: discord.Interaction) -> None:
+        embed = await self._settings_embed(interaction.guild)
+        await interaction.response.send_message(
+            embed=embed,
+            view=ServerSettingsView(self, interaction.user.id),
+            ephemeral=True,
+        )
+
+
+class ServerSettingsSelect(discord.ui.Select):
+    def __init__(self, cog: GuildSettings) -> None:
+        self.cog = cog
+        super().__init__(
+            placeholder="選擇要調整的伺服器設定",
+            options=[
+                discord.SelectOption(label="歡迎訊息頻道", value="welcome"),
+                discord.SelectOption(label="離開訊息頻道", value="leave"),
+                discord.SelectOption(label="管理日誌頻道", value="log"),
+                discord.SelectOption(label="新成員自動身份組", value="autorole"),
+                discord.SelectOption(label="工單類別", value="ticket_category"),
+                discord.SelectOption(label="工單支援身份組", value="ticket_support"),
+                discord.SelectOption(label="重新整理設定資訊", value="info"),
+                discord.SelectOption(label="重置全部設定", value="reset"),
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if error := missing_permissions(interaction, user=("administrator",)):
+            await interaction.response.send_message(error, ephemeral=True)
+            return
+        action = self.values[0]
+        if action == "info":
+            await interaction.response.edit_message(
+                embed=await self.cog._settings_embed(interaction.guild),
+                view=self.view,
+            )
+            return
+        if action == "reset":
+            await request_confirmation(
+                interaction,
+                title="確認重置伺服器設定",
+                description="歡迎、離開、日誌、自動身份組與工單設定都會被清除。",
+                action=guarded_action(self.cog._reset_settings, user=("administrator",)),
+            )
+            return
+
+        channel_options = {
+            "welcome": ("welcome_channel_id", "歡迎訊息頻道", [discord.ChannelType.text]),
+            "leave": ("leave_channel_id", "離開訊息頻道", [discord.ChannelType.text]),
+            "log": ("log_channel_id", "管理日誌頻道", [discord.ChannelType.text]),
+            "ticket_category": ("ticket_category_id", "工單類別", [discord.ChannelType.category]),
+        }
+        if action in channel_options:
+            key, label, channel_types = channel_options[action]
+            await interaction.response.send_message(
+                f"請選擇{label}：",
+                view=ServerChannelView(self.cog, key, label, channel_types),
+                ephemeral=True,
+            )
+            return
+
+        key, label = (
+            ("auto_role_id", "新成員自動身份組")
+            if action == "autorole"
+            else ("ticket_support_role", "工單支援身份組")
+        )
+        await interaction.response.send_message(
+            f"請選擇{label}，或按下停用：",
+            view=ServerRoleView(self.cog, key, label),
+            ephemeral=True,
+        )
+
+
+class ServerSettingsView(discord.ui.View):
+    def __init__(self, cog: GuildSettings, user_id: int) -> None:
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.add_item(ServerSettingsSelect(cog))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message("這不是你的設定面板。", ephemeral=True)
+        return False
+
+
+class ServerChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, cog: GuildSettings, key: str, label: str, channel_types: list[discord.ChannelType]) -> None:
+        super().__init__(channel_types=channel_types, min_values=1, max_values=1)
+        self.cog, self.key, self.label = cog, key, label
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.cog._set_channel(interaction, self.key, self.values[0], self.label)
+
+
+class ServerChannelView(discord.ui.View):
+    def __init__(self, cog: GuildSettings, key: str, label: str, channel_types: list[discord.ChannelType]) -> None:
+        super().__init__(timeout=120)
+        self.cog, self.key, self.label = cog, key, label
+        self.add_item(ServerChannelSelect(cog, key, label, channel_types))
+
+    @discord.ui.button(label="停用此設定", style=discord.ButtonStyle.secondary)
+    async def disable(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.cog._set_channel(interaction, self.key, None, self.label)
+
+
+class ServerRoleSelect(discord.ui.RoleSelect):
+    def __init__(self, cog: GuildSettings, key: str, label: str) -> None:
+        super().__init__(min_values=1, max_values=1)
+        self.cog, self.key, self.label = cog, key, label
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.cog._set_role(interaction, self.key, self.values[0], self.label)
+
+
+class ServerRoleView(discord.ui.View):
+    def __init__(self, cog: GuildSettings, key: str, label: str) -> None:
+        super().__init__(timeout=120)
+        self.cog, self.key, self.label = cog, key, label
+        self.add_item(ServerRoleSelect(cog, key, label))
+
+    @discord.ui.button(label="停用此設定", style=discord.ButtonStyle.secondary)
+    async def disable(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await self.cog._set_role(interaction, self.key, None, self.label)
 
 
 async def setup(bot: commands.Bot) -> None:

@@ -4,7 +4,7 @@ cogs/talk/say.py
 職責：
 - /say：以 Bot 身份在目前頻道發送訊息（支援附件、回覆、圖片 URL）
 - 使用者需有 Manage Messages 權限
-- 代發內文會標示發起者：「user id」説：內容
+- 代發內文會標示發起者：**暱稱**說：內容
 
 Modification():
 
@@ -49,11 +49,9 @@ class Say(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    @app_commands.command(name="say", description="使用 Bot 發送訊息")
+    @app_commands.command(name="say", description="開啟 Bot 訊息發送面板")
     @app_commands.describe(
-        content    = "要發送的文字內容",
-        image_url  = "圖片網址（選填）",
-        message_id = "要回覆的訊息 ID（選填）",
+        content    = "直接發送純文字（留空則開啟整合面板）",
         image1     = "附件圖片 1（選填）",
         image2     = "附件圖片 2（選填）",
         image3     = "附件圖片 3（選填）",
@@ -65,12 +63,38 @@ class Say(commands.Cog):
     async def cmd_say(
         self,
         interaction: discord.Interaction,
-        content:     app_commands.Range[str, 1, 1976],
-        image_url:   str | None                  = None,
-        message_id:  str | None                  = None,
+        content:     app_commands.Range[str, 1, 1950] | None = None,
         image1:      discord.Attachment | None   = None,
         image2:      discord.Attachment | None   = None,
         image3:      discord.Attachment | None   = None,
+    ) -> None:
+        attachments = tuple(img for img in (image1, image2, image3) if img is not None)
+        if content is None:
+            embed = discord.Embed(
+                title="訊息發送面板",
+                description=(
+                    "請選擇發送方式：Bot 訊息、Webhook 自訂身分，或 Embed。\n"
+                    "如有在 `/say` 附上檔案，會隨 Bot 訊息或 Webhook 一併發送。"
+                ),
+                color=discord.Color.blurple(),
+                timestamp=discord.utils.utcnow(),
+            )
+            await interaction.response.send_message(
+                embed=embed,
+                view=MessageSenderView(self, interaction.user.id, attachments),
+                ephemeral=True,
+            )
+            return
+
+        await self.send_plain(interaction, content, attachments=attachments)
+
+    async def send_plain(
+        self,
+        interaction: discord.Interaction,
+        content: str,
+        image_url: str | None = None,
+        message_id: str | None = None,
+        attachments: tuple[discord.Attachment, ...] = (),
     ) -> None:
         channel   = interaction.channel
         if channel is None:
@@ -79,7 +103,7 @@ class Say(commands.Cog):
 
         bot_member = interaction.guild.me
         bot_permissions = channel.permissions_for(bot_member)
-        if any(img is not None for img in (image1, image2, image3)) and not bot_permissions.attach_files:
+        if attachments and not bot_permissions.attach_files:
             await interaction.response.send_message("Bot 沒有上傳附件的權限。", ephemeral=True)
             return
         if image_url and not bot_permissions.embed_links:
@@ -90,8 +114,7 @@ class Say(commands.Cog):
 
         files = [
             await img.to_file()
-            for img in (image1, image2, image3)
-            if img is not None
+            for img in attachments
         ]
 
         try:
@@ -104,7 +127,13 @@ class Say(commands.Cog):
                 users=True,
                 replied_user=True,
             )
-            labelled_content = f"「{interaction.user.id}」説：{content}"
+            display_name = str(
+                getattr(interaction.user, "display_name", None)
+                or getattr(interaction.user, "name", None)
+                or interaction.user.id
+            )
+            safe_display_name = discord.utils.escape_markdown(display_name)
+            labelled_content = f"**{safe_display_name}**說：{content}"
             await channel.send(
                 labelled_content,
                 files=files,
@@ -125,6 +154,188 @@ class Say(commands.Cog):
             await interaction.response.send_message("找不到指定的訊息 ID。", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"錯誤：```{e}```", ephemeral=True)
+
+
+class MessageSenderSelect(discord.ui.Select):
+    def __init__(self, cog: Say, attachments: tuple[discord.Attachment, ...]) -> None:
+        self.cog, self.attachments = cog, attachments
+        super().__init__(placeholder="選擇發送方式", options=[
+            discord.SelectOption(label="Bot 訊息", value="plain", description="以 Bot 身份發送文字、圖片或附件"),
+            discord.SelectOption(label="Webhook 訊息", value="webhook", description="使用自訂名稱與頭像發送"),
+            discord.SelectOption(label="Embed 訊息", value="embed", description="發送自訂嵌入式訊息"),
+        ])
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        mode = self.values[0]
+        if mode == "webhook":
+            permissions = interaction.channel.permissions_for(interaction.user)
+            bot_permissions = interaction.channel.permissions_for(interaction.guild.me)
+            if not permissions.manage_webhooks:
+                await interaction.response.send_message("你需要「管理 Webhook」權限。", ephemeral=True)
+                return
+            if not bot_permissions.manage_webhooks:
+                await interaction.response.send_message("Bot 缺少「管理 Webhook」權限。", ephemeral=True)
+                return
+        if mode == "embed":
+            bot_permissions = interaction.channel.permissions_for(interaction.guild.me)
+            if not bot_permissions.embed_links:
+                await interaction.response.send_message("Bot 缺少「嵌入連結」權限。", ephemeral=True)
+                return
+            await interaction.response.send_message(
+                "使用下方按鈕分段編輯 Embed，完成後按「發送 Embed」。",
+                view=EmbedComposerView(self.cog, interaction.user.id), ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(MessageSenderModal(self.cog, mode, self.attachments))
+
+
+class MessageSenderView(discord.ui.View):
+    def __init__(self, cog: Say, user_id: int, attachments: tuple[discord.Attachment, ...]) -> None:
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.add_item(MessageSenderSelect(cog, attachments))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message("這不是你的訊息發送面板。", ephemeral=True)
+        return False
+
+
+class MessageSenderModal(discord.ui.Modal):
+    def __init__(self, cog: Say, mode: str, attachments: tuple[discord.Attachment, ...]) -> None:
+        titles = {"plain": "發送 Bot 訊息", "webhook": "發送 Webhook 訊息", "embed": "發送 Embed 訊息"}
+        super().__init__(title=titles[mode])
+        self.cog, self.mode, self.attachments = cog, mode, attachments
+        self.inputs: dict[str, discord.ui.TextInput] = {}
+
+        def add(key: str, label: str, **kwargs: object) -> None:
+            item = discord.ui.TextInput(label=label, **kwargs)
+            self.inputs[key] = item
+            self.add_item(item)
+
+        if mode == "plain":
+            add("content", "訊息內容", max_length=1950, style=discord.TextStyle.paragraph)
+            add("image_url", "圖片 URL（選填）", required=False)
+            add("message_id", "回覆訊息 ID（選填）", required=False, max_length=20)
+        elif mode == "webhook":
+            add("content", "訊息內容", max_length=1900, style=discord.TextStyle.paragraph)
+            add("username", "顯示名稱（選填）", required=False, max_length=80)
+            add("avatar_url", "頭像 URL（選填）", required=False)
+            add("image_url", "圖片 URL（選填）", required=False)
+            add("message_id", "引用訊息 ID（選填）", required=False, max_length=20)
+        else:
+            add("title", "標題（選填）", required=False, max_length=256)
+            add("description", "內文", max_length=4000, style=discord.TextStyle.paragraph)
+            add("color", "顏色（如 #FF5733 或 red）", required=False, max_length=30)
+            add("image_url", "主要圖片 URL（選填）", required=False)
+            add("footer", "頁腳文字（選填）", required=False, max_length=2048)
+
+    def value(self, key: str) -> str | None:
+        if key not in self.inputs:
+            return None
+        return str(self.inputs[key].value).strip() or None
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if self.mode == "plain":
+            await self.cog.send_plain(
+                interaction, self.value("content") or "", self.value("image_url"),
+                self.value("message_id"), self.attachments,
+            )
+            return
+        if self.mode == "webhook":
+            webhook_cog = self.cog.bot.get_cog("WebhookSender")
+            if webhook_cog is None:
+                await interaction.response.send_message("Webhook 功能尚未載入。", ephemeral=True)
+                return
+            await webhook_cog.cmd_webhook.callback(
+                webhook_cog, interaction, self.value("content") or "",
+                self.value("username"), self.value("avatar_url"), self.value("image_url"),
+                self.value("message_id"), *self.attachments, *([None] * (3 - len(self.attachments))),
+            )
+            return
+
+        embed_cog = self.cog.bot.get_cog("EmbedBuilder")
+        if embed_cog is None:
+            await interaction.response.send_message("Embed 功能尚未載入。", ephemeral=True)
+            return
+        await embed_cog.cmd_embed.callback(
+            embed_cog, interaction, title=self.value("title"),
+            description=self.value("description"), color=self.value("color"),
+            footer=self.value("footer"), image_url=self.value("image_url"),
+        )
+
+
+class EmbedComposerView(discord.ui.View):
+    def __init__(self, cog: Say, user_id: int) -> None:
+        super().__init__(timeout=300)
+        self.cog, self.user_id = cog, user_id
+        self.data: dict[str, str | None] = {}
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message("這不是你的 Embed 編輯器。", ephemeral=True)
+        return False
+
+    @discord.ui.button(label="基本內容", style=discord.ButtonStyle.secondary)
+    async def basic(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(EmbedSectionModal(self, "basic"))
+
+    @discord.ui.button(label="作者與頁腳", style=discord.ButtonStyle.secondary)
+    async def attribution(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(EmbedSectionModal(self, "attribution"))
+
+    @discord.ui.button(label="圖片與回覆", style=discord.ButtonStyle.secondary)
+    async def media(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await interaction.response.send_modal(EmbedSectionModal(self, "media"))
+
+    @discord.ui.button(label="發送 Embed", style=discord.ButtonStyle.primary)
+    async def send(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if not self.data.get("title") and not self.data.get("description"):
+            await interaction.response.send_message("請先填寫 Embed 標題或內文。", ephemeral=True)
+            return
+        embed_cog = self.cog.bot.get_cog("EmbedBuilder")
+        if embed_cog is None:
+            await interaction.response.send_message("Embed 功能尚未載入。", ephemeral=True)
+            return
+        await embed_cog.cmd_embed.callback(embed_cog, interaction, **self.data)
+        self.stop()
+
+
+class EmbedSectionModal(discord.ui.Modal):
+    def __init__(self, composer: EmbedComposerView, section: str) -> None:
+        titles = {"basic": "Embed 基本內容", "attribution": "Embed 作者與頁腳", "media": "Embed 圖片與回覆"}
+        super().__init__(title=titles[section])
+        self.composer, self.section = composer, section
+        self.inputs: dict[str, discord.ui.TextInput] = {}
+
+        def add(key: str, label: str, **kwargs: object) -> None:
+            current = composer.data.get(key)
+            if current:
+                kwargs["default"] = current
+            item = discord.ui.TextInput(label=label, required=False, **kwargs)
+            self.inputs[key] = item
+            self.add_item(item)
+
+        if section == "basic":
+            add("title", "標題", max_length=256)
+            add("description", "內文", max_length=4000, style=discord.TextStyle.paragraph)
+            add("color", "顏色（如 #FF5733 或 red）", max_length=30)
+        elif section == "attribution":
+            add("author", "作者名稱", max_length=256)
+            add("author_icon", "作者圖示 URL")
+            add("footer", "頁腳文字", max_length=2048)
+            add("footer_icon", "頁腳圖示 URL")
+        else:
+            add("thumbnail", "縮圖 URL")
+            add("image_url", "主要圖片 URL")
+            add("message_id", "回覆訊息 ID", max_length=20)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        for key, item in self.inputs.items():
+            self.composer.data[key] = str(item.value).strip() or None
+        await interaction.response.send_message("已儲存這一段 Embed 設定。", ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:

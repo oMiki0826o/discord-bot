@@ -58,6 +58,9 @@ _CATEGORY_NAMES: dict[str, str] = {
     "system": "系統管理",
 }
 
+_TRUE_VALUES: frozenset[str] = frozenset({"true", "t", "1", "yes", "y", "on", "開", "開啟"})
+_FALSE_VALUES: frozenset[str] = frozenset({"false", "f", "0", "no", "n", "off", "關", "關閉"})
+
 
 # ── Prefix Help 產生工具 ──────────────────────
 
@@ -108,6 +111,27 @@ def _append_help_entry(
     )
 
 
+def _parse_bool(value: str) -> bool | None:
+    """解析 prefix 指令常見布林輸入。"""
+    normalized = value.strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    return None
+
+
+def _prompt_logging_core_is_active() -> bool:
+    """判斷目前 process 載入的 AI core 是否包含 Prompt 紀錄功能。"""
+    try:
+        from core.ai import core as ai_core
+
+        code = getattr(ai_core.generate, "__code__", None)
+        return code is not None and "send_prompt_to_discord" in code.co_names
+    except Exception:
+        return False
+
+
 async def _build_prefix_help_pages(ctx: commands.Context) -> list[HelpPage]:
     """動態產生依功能分類的 prefix command Help 頁面。"""
     prefix = str(ctx.prefix or "$")
@@ -134,20 +158,14 @@ async def _build_prefix_help_pages(ctx: commands.Context) -> list[HelpPage]:
 
 # ── Slash 指令 Owner 驗證 ──────────────────────
 
-def _is_owner() -> app_commands.check:
-    """
-    app_commands.check 版本的 is_owner 驗證。
+# ── 私訊錯誤回覆工具 ──────────────────────
 
-    commands.is_owner() 只適用於前綴指令（Context），
-    Slash 指令（Interaction）需要獨立實作；
-    直接委派 bot.is_owner()，正確處理 Team 擁有的應用程式。
-    """
+def _is_owner() -> app_commands.check:
+    """舊 Slash callback 的 Owner 驗證；這些 callback 不再註冊到指令樹。"""
     async def predicate(interaction: discord.Interaction) -> bool:
         return await interaction.client.is_owner(interaction.user)
     return app_commands.check(predicate)
 
-
-# ── 私訊錯誤回覆工具 ──────────────────────
 
 async def _reply_error(interaction: discord.Interaction, message: str) -> None:
     """
@@ -230,6 +248,102 @@ class Owner(commands.Cog, name="Owner"):
             "設定已寫入 settings.json，重啟後仍然生效"
         )
         logger.info("[owner.$game] type=%s text=%s by=%s", status_type, status_text, ctx.author)
+
+    # ── $ai_other_apps ──────────────────────
+
+    @commands.command(
+        name="ai_other_apps",
+        aliases=["ai_other_bots", "ai_apps"],
+        hidden=True,
+    )
+    @commands.is_owner()
+    async def ai_other_apps(
+        self,
+        ctx: commands.Context,
+        value: str | None = None,
+    ) -> None:
+        """$ai_other_apps true|false — 設定 AI 是否回覆其他 Bot／應用的 mention"""
+        if value is None:
+            current = bool(get("ai.allow_other_applications", True))
+            await ctx.send(
+                "目前 `ai.allow_other_applications` = "
+                f"`{current}`\n"
+                "用法：`$ai_other_apps true` 或 `$ai_other_apps false`"
+            )
+            return
+
+        parsed = _parse_bool(value)
+        if parsed is None:
+            await ctx.send(
+                "值只能是 `true` 或 `false`。\n"
+                "也可使用 `on/off`、`1/0`、`yes/no`。"
+            )
+            return
+
+        try:
+            write_value("ai.allow_other_applications", parsed)
+        except Exception as e:
+            logger.warning("[owner.$ai_other_apps] 寫入 settings.json 失敗: %s", e)
+            await ctx.send(f"寫入 settings.json 失敗：{e}")
+            return
+
+        status = "會" if parsed else "不會"
+        await ctx.send(
+            "`ai.allow_other_applications` 已設定為 "
+            f"`{parsed}`\n"
+            f"現在 AI {status}回覆其他 Bot／應用程式的 mention。"
+        )
+        logger.info("[owner.$ai_other_apps] value=%s by=%s", parsed, ctx.author)
+
+    # ── $ai_show_prompt ──────────────────────
+
+    @commands.command(
+        name="ai_show_prompt",
+        aliases=["show_prompt", "prompt_log"],
+        hidden=True,
+    )
+    @commands.is_owner()
+    async def ai_show_prompt(
+        self,
+        ctx: commands.Context,
+        value: str | None = None,
+    ) -> None:
+        """$ai_show_prompt true|false — 設定是否記錄每次 AI Prompt"""
+        if value is None:
+            current = bool(get("ai.show_prompt", False))
+            await ctx.send(
+                f"目前 `ai.show_prompt` = `{current}`\n"
+                "用法：`$ai_show_prompt true` 或 `$ai_show_prompt false`"
+            )
+            return
+
+        parsed = _parse_bool(value)
+        if parsed is None:
+            await ctx.send(
+                "值只能是 `true` 或 `false`。\n"
+                "也可使用 `on/off`、`1/0`、`yes/no`。"
+            )
+            return
+
+        try:
+            write_value("ai.show_prompt", parsed)
+        except Exception as e:
+            logger.warning("[owner.$ai_show_prompt] 寫入 settings.json 失敗: %s", e)
+            await ctx.send(f"寫入 settings.json 失敗：{e}")
+            return
+
+        if parsed and not _prompt_logging_core_is_active():
+            await ctx.send(
+                "`ai.show_prompt` 已設定為 `True`，但目前執行中的 AI core "
+                "仍是舊版本。\n請完整重啟 Bot；僅使用 `$bot_reload` 不會重載 core。"
+            )
+        else:
+            destination = "程式 log 與頻道 `1550078091949506622`" if parsed else "任何位置"
+            await ctx.send(
+                f"`ai.show_prompt` 已設定為 `{parsed}`。\n"
+                f"之後的 AI Prompt {'會' if parsed else '不會'}顯示於{destination}。"
+            )
+        logger.info("[owner.$ai_show_prompt] value=%s by=%s", parsed, ctx.author)
 
     # ── $slash ──────────────────────
 
@@ -376,6 +490,50 @@ class Owner(commands.Cog, name="Owner"):
                 ephemeral=True,
             )
 
+    @commands.command(name="reply")
+    @commands.is_owner()
+    async def prefix_reply(self, ctx: commands.Context, *, message: str) -> None:
+        """$reply [user_id] <內容> — 回覆指定或最近私訊的使用者。"""
+        parts = message.split(maxsplit=1)
+        explicit_id = len(parts) == 2 and parts[0].isdigit() and 15 <= len(parts[0]) <= 20
+        content = parts[1] if explicit_id else message
+        if explicit_id:
+            target_id = int(parts[0])
+        else:
+            messenger = self.bot.get_cog("Messenger")
+            target_id = getattr(messenger, "last_dm_user_id", None)
+            if target_id is None:
+                await ctx.send("沒有最近私訊使用者紀錄")
+                return
+        try:
+            user = await self.bot.fetch_user(target_id)
+            await user.send(f"來自擁有者回覆：\n{content}")
+        except discord.NotFound:
+            await ctx.send(f"找不到使用者 `{target_id}`")
+            return
+        except discord.HTTPException as e:
+            await ctx.send(friendly_http_error(e))
+            return
+        await ctx.send(f"已回覆給 {user}（ID: `{target_id}`）")
+        logger.info("[owner.$reply] → %s (%s): %s", user, target_id, content[:80])
+
+    @commands.command(name="talk")
+    @commands.is_owner()
+    async def prefix_talk(self, ctx: commands.Context, user: discord.User, *, content: str) -> None:
+        """$talk <user> <內容> — 讓 Bot 私訊指定使用者。"""
+        try:
+            files = [await attachment.to_file() for attachment in ctx.message.attachments]
+            await user.send(content, files=files)
+        except discord.HTTPException as e:
+            await ctx.send(friendly_http_error(e))
+            return
+        await ctx.send(f"已私訊 {user.mention}")
+        logger.info("[owner.$talk] → %s: %s", user, content[:80])
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Owner(bot))
+
+
+# /reply 與 /talk 已改為 Owner-only prefix 指令，不再註冊 Slash 版本。
+Owner.__cog_app_commands__ = []

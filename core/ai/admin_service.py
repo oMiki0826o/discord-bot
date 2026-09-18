@@ -56,7 +56,7 @@ logger = logging.getLogger("bot.admin_service")
 
 # ── 全系統統計 ──────────────────────
 
-def get_dashboard_data(bot) -> dict:
+async def get_dashboard_data(bot) -> dict:
     """
     組合 Dashboard embed 所需的所有資料。
     bot 物件用於取得 guilds 數量和延遲。
@@ -64,8 +64,10 @@ def get_dashboard_data(bot) -> dict:
     stats        = get_global_stats(hours=24)
     cache        = get_cache_stats()
     mem_count    = get_total_memory_count()
-    vec_count    = mem_repo.count_vectors()
-    summary_count= mem_repo.count_summaries()
+    vec_count, summary_count = await asyncio.gather(
+        mem_repo.count_vectors(),
+        mem_repo.count_summaries(),
+    )
     user_count   = get_total_user_count()
 
     return {
@@ -73,6 +75,7 @@ def get_dashboard_data(bot) -> dict:
         "tokens_24h":     stats["total_tokens"],
         "active_users":   stats["active_users"],
         "error_count":    stats["error_count"],
+        "provider_error_count": stats["provider_error_count"],
         "error_rate":     stats["error_rate"],
         "cache_hits":     stats["cache_hits"],
         "cache_valid":    cache["valid"],

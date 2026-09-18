@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import re
 import time
 import weakref
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import AsyncIterator
 
 from core.system.settings import get_int
@@ -15,10 +17,17 @@ from core.system.settings import get_int
 # 保留公開 dict 讓診斷與測試可直接清除；值為 monotonic 到期時間。
 MODEL_QUOTA_UNTIL: dict[str, float] = {}
 
+_RETRY_DELAY_RE = re.compile(
+    r"(?:retryDelay['\"\s:]+|retry\s+in\s+)(\d+(?:\.\d+)?)\s*s",
+    re.IGNORECASE,
+)
+_STATUS_CODE_RE = re.compile(r"(?<!\d)(429|5\d\d)(?!\d)")
+
 
 @dataclass
 class _LoopState:
     foreground_active: int = 0
+    background_models_in_progress: set[str] = field(default_factory=set)
 
 
 _loop_states: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _LoopState] = (
@@ -46,6 +55,38 @@ def mark_quota_exhausted(model: str, cooldown: int | None = None) -> None:
         if cooldown is None else max(0, cooldown)
     )
     MODEL_QUOTA_UNTIL[model] = time.monotonic() + seconds
+
+
+def retry_delay_seconds(error: BaseException | str) -> int | None:
+    """Extract the provider retry delay, rounding up partial seconds."""
+    match = _RETRY_DELAY_RE.search(str(error))
+    if match is None:
+        return None
+    return max(0, math.ceil(float(match.group(1))))
+
+
+def error_status_code(error: BaseException | str) -> int | None:
+    """Return a useful HTTP/provider status code for structured logging."""
+    code = getattr(error, "code", None)
+    try:
+        if code is not None:
+            return int(code)
+    except (TypeError, ValueError):
+        pass
+    match = _STATUS_CODE_RE.search(str(error))
+    return int(match.group(1)) if match else None
+
+
+def mark_quota_exhausted_from_error(
+    model: str,
+    error: BaseException | str,
+) -> int:
+    """Apply the provider retry delay when present, otherwise use settings."""
+    retry_after = retry_delay_seconds(error)
+    if retry_after is None:
+        retry_after = max(0, get_int("ai.model_quota_cooldown_seconds", 300))
+    mark_quota_exhausted(model, retry_after)
+    return retry_after
 
 
 def clear_quota_cooldown(model: str) -> None:
@@ -77,7 +118,16 @@ async def background_request(model: str) -> AsyncIterator[bool]:
     爆量呼叫更安全。下一輪對話仍會再次觸發更新。
     """
     state = _state()
-    if state.foreground_active > 0 or quota_remaining(model) > 0:
+    active_models = state.background_models_in_progress
+    if (
+        state.foreground_active > 0
+        or quota_remaining(model) > 0
+        or model in active_models
+    ):
         yield False
         return
-    yield True
+    active_models.add(model)
+    try:
+        yield True
+    finally:
+        active_models.discard(model)

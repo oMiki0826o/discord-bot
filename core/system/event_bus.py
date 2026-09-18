@@ -114,8 +114,11 @@ async def _safe_call(
     event:   str,
     **kwargs: Any,
 ) -> None:
-    """包裝 handler 呼叫，例外靜默 log，不對外拋出。"""
+    """包裝 handler 呼叫，例外寫入完整日誌，不對外拋出。"""
     try:
         await handler(**kwargs)
-    except Exception as e:
-        logger.debug("[event_bus] handler=%s event=%s error=%s", handler.__name__, event, e)
+    except Exception:
+        logger.exception(
+            "[event_bus] handler=%s event=%s failed",
+            handler.__name__, event,
+        )

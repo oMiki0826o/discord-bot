@@ -8,12 +8,12 @@ Modification():
   問候語）已明確採用不使用 emoji 的規範，這裡的按鈕先前沒有跟上，
   是本次健檢一併統一的小地方。
 - 全新建立，整合至 firefly-bot 架構
-- 工單建立使用 /ticket open，顯示含「關閉工單」按鈕的 Embed
+- 工單建立使用單一 /ticket 指令的 action 選單，並顯示含「關閉工單」按鈕的 Embed
 - 關閉按鈕（CloseView）以持久化 View 設計，Bot 重啟後仍可響應
 - 冷卻機制與最大開票數限制均從 settings.json 讀取，可熱更新
 
 職責：
-- 工單（Ticket）系統，提供 /ticket open / close / add / remove / stats
+- 工單（Ticket）系統，以 /ticket 的 action 選單提供 open / close / add / remove / stats / panel
 - 每張工單建立一個私人文字頻道，僅工單建立者與支援身份組可見
 - 工單關閉後：若設定封存類別則移入封存，否則刪除頻道
 - 使用 Slash Commands + Button UI，提供直觀的操作體驗
@@ -32,6 +32,7 @@ from discord.ext import commands
 from core.system.settings import get as _s_get
 import database.repository.guild_repository as guild_repo
 import database.repository.ticket_repository as ticket_repo
+from utils.confirmation import guarded_action, missing_permissions, request_confirmation
 
 logger = logging.getLogger("bot.ticket")
 
@@ -62,8 +63,13 @@ class CloseView(discord.ui.View):
         interaction: discord.Interaction,
         button:      discord.ui.Button,
     ) -> None:
-        """按下關閉按鈕時觸發，與 /ticket close 邏輯共用。"""
-        await _close_ticket(interaction)
+        """按下關閉按鈕時觸發，與 /ticket 的 close action 共用邏輯。"""
+        await request_confirmation(
+            interaction,
+            title="確認關閉工單",
+            description="工單將在確認後封存或刪除，請確認問題已處理完成。",
+            action=guarded_action(_close_ticket, bot=("manage_channels",)),
+        )
 
 
 # ── 工單建立面板 ──────────────────────
@@ -111,7 +117,7 @@ async def _open_ticket(
 ) -> None:
     """
     建立工單頻道的核心邏輯。
-    由 /ticket open 或 TicketModal.on_submit 呼叫。
+    由 /ticket 的 open action 或 TicketModal.on_submit 呼叫。
     """
     guild   = interaction.guild
     user    = interaction.user
@@ -235,7 +241,7 @@ async def _open_ticket(
 async def _close_ticket(interaction: discord.Interaction) -> None:
     """
     關閉工單的核心邏輯。
-    由按鈕回呼或 /ticket close 呼叫。
+    由按鈕回呼或 /ticket 的 close action 呼叫。
     """
     channel = interaction.channel
     if not isinstance(channel, discord.TextChannel):
@@ -329,15 +335,84 @@ class Ticket(commands.Cog):
         bot.add_view(CloseView())
         bot.add_view(TicketPanel())
 
-    ticket_group = app_commands.Group(
-        name="ticket", description="工單系統", guild_only=True,
-    )
+    @app_commands.command(name="ticket", description="開啟工單管理面板")
+    @app_commands.guild_only()
+    async def cmd_ticket(self, interaction: discord.Interaction) -> None:
+        embed = discord.Embed(
+            title="工單管理面板",
+            description="請從下方選單建立或管理工單。",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
+        )
+        await interaction.response.send_message(
+            embed=embed, view=TicketManagementView(self, interaction.user.id), ephemeral=True,
+        )
+
+    async def dispatch_action(
+        self,
+        interaction: discord.Interaction,
+        value: str,
+        topic: str = "",
+        member: discord.Member | None = None,
+    ) -> None:
+        if value == "open":
+            if error := missing_permissions(interaction, bot=("manage_channels",)):
+                await interaction.response.send_message(error, ephemeral=True)
+                return
+            await self.cmd_open(interaction, topic)
+            return
+
+        permission_map = {
+            "add": (("moderate_members",), ("manage_channels",)),
+            "remove": (("moderate_members",), ("manage_channels",)),
+            "stats": (("moderate_members",), ()),
+            "panel": (("administrator",), ("send_messages", "embed_links")),
+            "close": ((), ("manage_channels",)),
+        }
+        user_perms, bot_perms = permission_map[value]
+        if error := missing_permissions(interaction, user=user_perms, bot=bot_perms):
+            await interaction.response.send_message(error, ephemeral=True)
+            return
+
+        if value == "stats":
+            await self.cmd_stats(interaction)
+            return
+        if value == "panel":
+            await request_confirmation(
+                interaction,
+                title="確認發送工單面板",
+                description=f"將在 {interaction.channel.mention} 發送公開的工單建立面板。",
+                action=guarded_action(
+                    self.cmd_panel,
+                    user=("administrator",), bot=("send_messages", "embed_links"),
+                ),
+            )
+            return
+        if value == "close":
+            await request_confirmation(
+                interaction,
+                title="確認關閉工單",
+                description="工單將在確認後封存或刪除。",
+                action=guarded_action(self.cmd_close, bot=("manage_channels",)),
+            )
+            return
+        if member is None:
+            await interaction.response.send_message("加入或移除操作必須選擇成員。", ephemeral=True)
+            return
+
+        operation = self.cmd_add if value == "add" else self.cmd_remove
+        await request_confirmation(
+            interaction,
+            title=f"確認{'加入' if value == 'add' else '移除'}工單成員",
+            description=f"目標成員：{member.mention}",
+            action=guarded_action(
+                lambda click: operation(click, member),
+                user=("moderate_members",), bot=("manage_channels",),
+            ),
+        )
 
     # ── /ticket open ──────────────────────
 
-    @ticket_group.command(name="open", description="建立新工單")
-    @app_commands.describe(topic="工單主題（選填）")
-    @app_commands.checks.bot_has_permissions(manage_channels=True)
     async def cmd_open(
         self,
         interaction: discord.Interaction,
@@ -347,18 +422,11 @@ class Ticket(commands.Cog):
 
     # ── /ticket close ──────────────────────
 
-    @ticket_group.command(name="close", description="關閉目前頻道的工單")
-    @app_commands.checks.bot_has_permissions(manage_channels=True)
     async def cmd_close(self, interaction: discord.Interaction) -> None:
         await _close_ticket(interaction)
 
     # ── /ticket add ──────────────────────
 
-    @ticket_group.command(name="add", description="將成員加入工單頻道")
-    @app_commands.describe(member="要加入的成員")
-    @app_commands.default_permissions(moderate_members=True)
-    @app_commands.checks.has_permissions(moderate_members=True)
-    @app_commands.checks.bot_has_permissions(manage_channels=True)
     async def cmd_add(
         self,
         interaction: discord.Interaction,
@@ -391,11 +459,6 @@ class Ticket(commands.Cog):
 
     # ── /ticket remove ──────────────────────
 
-    @ticket_group.command(name="remove", description="從工單頻道移除成員")
-    @app_commands.describe(member="要移除的成員")
-    @app_commands.default_permissions(moderate_members=True)
-    @app_commands.checks.has_permissions(moderate_members=True)
-    @app_commands.checks.bot_has_permissions(manage_channels=True)
     async def cmd_remove(
         self,
         interaction: discord.Interaction,
@@ -423,9 +486,6 @@ class Ticket(commands.Cog):
 
     # ── /ticket stats ──────────────────────
 
-    @ticket_group.command(name="stats", description="查看伺服器工單統計")
-    @app_commands.default_permissions(moderate_members=True)
-    @app_commands.checks.has_permissions(moderate_members=True)
     async def cmd_stats(self, interaction: discord.Interaction) -> None:
         stats = await ticket_repo.get_guild_stats(interaction.guild.id)
 
@@ -442,14 +502,10 @@ class Ticket(commands.Cog):
 
     # ── /ticket panel ──────────────────────
 
-    @ticket_group.command(name="panel", description="在目前頻道發送工單建立面板")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.checks.bot_has_permissions(send_messages=True, embed_links=True)
     async def cmd_panel(self, interaction: discord.Interaction) -> None:
         """
         在當前頻道發送一個帶有「建立工單」按鈕的嵌入訊息，
-        讓使用者可以直接點擊建立工單，而不需要輸入 /ticket open。
+        讓使用者可以直接點擊建立工單，而不需要再次輸入 /ticket。
         """
         embed = discord.Embed(
             title       = "需要幫助嗎？",
@@ -461,6 +517,85 @@ class Ticket(commands.Cog):
 
 
 # ── extension 進入點 ──────────────────────
+
+class TicketActionSelect(discord.ui.Select):
+    def __init__(self, cog: Ticket) -> None:
+        self.cog = cog
+        super().__init__(placeholder="選擇工單操作", options=[
+            discord.SelectOption(label="建立工單", value="open"),
+            discord.SelectOption(label="關閉目前工單", value="close"),
+            discord.SelectOption(label="加入成員", value="add"),
+            discord.SelectOption(label="移除成員", value="remove"),
+            discord.SelectOption(label="查看統計", value="stats"),
+            discord.SelectOption(label="發送工單面板", value="panel"),
+        ])
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        action = self.values[0]
+        if action == "open":
+            await interaction.response.send_modal(TicketTopicModal(self.cog))
+        elif action in {"add", "remove"}:
+            await interaction.response.send_message(
+                "請選擇要加入或移除的成員：",
+                view=TicketMemberView(self.cog, action, interaction.user.id), ephemeral=True,
+            )
+        else:
+            await self.cog.dispatch_action(interaction, action)
+
+
+class TicketManagementView(discord.ui.View):
+    def __init__(self, cog: Ticket, user_id: int) -> None:
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.add_item(TicketActionSelect(cog))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message("這不是你的工單管理面板。", ephemeral=True)
+        return False
+
+
+class TicketTopicModal(discord.ui.Modal, title="建立工單"):
+    topic = discord.ui.TextInput(
+        label="工單主題（選填）", required=False, max_length=100,
+        style=discord.TextStyle.paragraph,
+    )
+
+    def __init__(self, cog: Ticket) -> None:
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog.dispatch_action(interaction, "open", topic=str(self.topic.value).strip())
+
+
+class TicketMemberSelect(discord.ui.UserSelect):
+    def __init__(self, cog: Ticket, action: str) -> None:
+        super().__init__(placeholder="選擇一位成員", min_values=1, max_values=1)
+        self.cog, self.action = cog, action
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        selected = self.values[0]
+        member = interaction.guild.get_member(selected.id)
+        if member is None:
+            await interaction.response.send_message("找不到這位伺服器成員。", ephemeral=True)
+            return
+        await self.cog.dispatch_action(interaction, self.action, member=member)
+
+
+class TicketMemberView(discord.ui.View):
+    def __init__(self, cog: Ticket, action: str, user_id: int) -> None:
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.add_item(TicketMemberSelect(cog, action))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message("這不是你的工單管理面板。", ephemeral=True)
+        return False
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Ticket(bot))

@@ -25,7 +25,9 @@ import importlib
 
 from discord.ext import commands
 
+import config
 from core.logging.log import LogManager
+from core.system.extension_loader import _collect_modules, _is_blacklisted
 
 # ── logger ──────────────────────
 logger = LogManager().get_logger("cogs.system.load")
@@ -39,6 +41,22 @@ _ACTION_LABELS: dict[str, str] = {
 
 # Discord 訊息內容上限為 2000；留緩衝避免邊界誤差
 _MESSAGE_LIMIT: int = 1900
+
+# Cog 會以 ``from ... import ...`` 取得這些無狀態共用工具；Cog 重載前必須
+# 先刷新它們，否則 sys.modules 仍保留舊版 API，會造成連鎖 ImportError。
+_SHARED_RELOAD_MODULES: tuple[str, ...] = (
+    "utils.confirmation",
+)
+
+
+def _reload_shared_dependencies() -> list[str]:
+    """依序匯入或重載可安全刷新、且不保存長期狀態的共用模組。"""
+    reloaded: list[str] = []
+    for module_name in _SHARED_RELOAD_MODULES:
+        module = importlib.import_module(module_name)
+        importlib.reload(module)
+        reloaded.append(module_name)
+    return reloaded
 
 
 def _music_core_restart_reasons() -> list[str]:
@@ -144,6 +162,8 @@ class Load(commands.Cog):
         module = _normalize_extension_name(extension)
 
         try:
+            if action in {"load", "reload"}:
+                _reload_shared_dependencies()
             await actions[action](module)
             await ctx.send(f"已{label} `{module}`")
             logger.info("%s：%s（操作者：%s）", label, module, ctx.author)
@@ -213,7 +233,18 @@ class Load(commands.Cog):
             logger.warning("bot_reload 取消：需重啟 | %s", restart_reasons)
             return
 
+        try:
+            shared_reloaded = _reload_shared_dependencies()
+        except Exception as exc:
+            logger.exception("bot_reload 取消：共用依賴重載失敗")
+            await ctx.send(
+                "共用依賴重載失敗，已取消 Cog 重載以避免大量連鎖錯誤："
+                f"`{type(exc).__name__}: {str(exc)[:300]}`"
+            )
+            return
+
         success: list[str] = []
+        loaded_new: list[str] = []
         failed: list[str] = []
 
         for ext in list(self.bot.extensions.keys()):
@@ -227,7 +258,28 @@ class Load(commands.Cog):
                 failed.append(f"{ext}（{detail}）")
                 logger.exception("bot_reload 失敗：%s", ext)
 
+        known = set(self.bot.extensions.keys())
+        for package in config.EXTENSION_PACKAGES:
+            for ext in _collect_modules(package, config.EXCLUDED_DIRS):
+                if ext in known or _is_blacklisted(ext, config.EXTENSION_BLACKLIST):
+                    continue
+                try:
+                    await self.bot.load_extension(ext)
+                    loaded_new.append(ext)
+                    known.add(ext)
+                    logger.info("bot_reload 補載新模組：%s", ext)
+                except Exception as exc:
+                    detail = str(exc)
+                    if len(detail) > 200:
+                        detail = detail[:200] + "..."
+                    failed.append(f"{ext}（{detail}）")
+                    logger.exception("bot_reload 補載失敗：%s", ext)
+
         msg = f"已重新載入 ```{len(success)} 個模組```"
+        if shared_reloaded:
+            msg += "\n已先重載共用依賴：" + ", ".join(f"`{name}`" for name in shared_reloaded)
+        if loaded_new:
+            msg += f"\n已補載新模組 ```{len(loaded_new)} 個```：\n" + "\n".join(loaded_new)
         if failed:
             msg += f"\n失敗 ```{len(failed)} 個```：\n" + "\n".join(failed)
 

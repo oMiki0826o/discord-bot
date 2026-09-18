@@ -8,16 +8,8 @@ cogs/voice/voice_channel.py
 - 頻道擁有者可用 /vc 指令客製化自己的頻道
 
 功能指令（Slash Command）：
-  /vc setup   — 管理員設定 JTC 觸發頻道
-  /vc name    — 更改頻道名稱
-  /vc limit   — 設定人數上限
-  /vc lock    — 鎖定頻道（阻止其他人進入）
-  /vc unlock  — 解鎖頻道
-  /vc permit  — 允許指定成員進入已鎖定的頻道
-  /vc reject  — 禁止指定成員進入此頻道
-  /vc kick    — 將成員踢出此頻道
-  /vc transfer — 將頻道所有權轉移給其他成員
-  /vc info    — 查看目前頻道設定
+  /vc — 透過 action 選單設定 JTC、管理自己的臨時頻道或查看資訊；
+  權限異動、轉移、踢出與強制刪除均需要二次確認。
 
 設計說明：
 - 觸發頻道（create_channel）本身永遠不刪除，其他動態頻道空了才刪
@@ -47,6 +39,7 @@ from discord.ext import commands
 from core.system.settings import get as _s_get
 import database.repository.vc_repository as vc_repo
 import database.repository.guild_repository as guild_repo
+from utils.confirmation import guarded_action, missing_permissions, request_confirmation
 
 logger = logging.getLogger("bot.voice")
 
@@ -227,9 +220,102 @@ class VoiceChannel(commands.Cog):
 
     # ── Slash Command 群組 ──────────────────────
 
-    vc_group = app_commands.Group(
-        name="vc", description="語音頻道管理（限頻道擁有者）", guild_only=True,
+    @app_commands.command(name="vc", description="臨時語音頻道設定與管理")
+    @app_commands.describe(
+        action="要執行的語音頻道操作", channel="設定觸發器或強制刪除的語音頻道",
+        category="臨時頻道所屬類別", template="建立臨時頻道時的名稱範本",
+        limit="頻道人數上限（0 表示無上限）", name="新的臨時頻道名稱",
+        member="允許、拒絕、踢出或轉移的目標成員",
     )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="設定加入即建立", value="setup"),
+        app_commands.Choice(name="變更頻道名稱", value="name"),
+        app_commands.Choice(name="設定人數上限", value="limit"),
+        app_commands.Choice(name="鎖定頻道", value="lock"),
+        app_commands.Choice(name="解鎖頻道", value="unlock"),
+        app_commands.Choice(name="允許成員", value="permit"),
+        app_commands.Choice(name="拒絕成員", value="reject"),
+        app_commands.Choice(name="踢出成員", value="kick"),
+        app_commands.Choice(name="轉移所有權", value="transfer"),
+        app_commands.Choice(name="查看頻道資訊", value="info"),
+        app_commands.Choice(name="管理員強制刪除", value="forcedelete"),
+    ])
+    @app_commands.guild_only()
+    async def cmd_vc(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        channel: discord.VoiceChannel | None = None,
+        category: discord.CategoryChannel | None = None,
+        template: app_commands.Range[str, 1, 100] = "{username} 的頻道",
+        limit: app_commands.Range[int, 0, 99] | None = None,
+        name: app_commands.Range[str, 1, 100] | None = None,
+        member: discord.Member | None = None,
+    ) -> None:
+        value = action.value
+        if value == "info":
+            await self.cmd_info(interaction)
+            return
+        if value in {"setup", "forcedelete"}:
+            bot_perms = ("manage_channels", "move_members") if value == "setup" else ("manage_channels",)
+            if error := missing_permissions(interaction, user=("administrator",), bot=bot_perms):
+                await interaction.response.send_message(error, ephemeral=True)
+                return
+            if channel is None:
+                await interaction.response.send_message("此操作必須選擇語音頻道。", ephemeral=True)
+                return
+            if value == "setup":
+                await request_confirmation(
+                    interaction, title="確認設定加入即建立頻道",
+                    description=f"觸發頻道：**{channel.name}**\n名稱範本：`{template}`",
+                    action=guarded_action(
+                        lambda click: self.cmd_setup(click, channel, category, template, limit or 0),
+                        user=("administrator",), bot=bot_perms,
+                    ),
+                )
+            else:
+                await request_confirmation(
+                    interaction, title="確認強制刪除臨時頻道",
+                    description=f"將永久刪除 **{channel.name}**，並移除資料庫紀錄。",
+                    action=guarded_action(
+                        lambda click: self.cmd_forcedelete(click, channel),
+                        user=("administrator",), bot=bot_perms,
+                    ),
+                )
+            return
+        if value == "name":
+            if not name:
+                await interaction.response.send_message("更名時必須填寫新名稱。", ephemeral=True)
+                return
+            await self.cmd_name(interaction, name)
+            return
+        if value == "limit":
+            if limit is None:
+                await interaction.response.send_message("設定上限時必須填寫 limit。", ephemeral=True)
+                return
+            await self.cmd_limit(interaction, limit)
+            return
+        no_target = {"lock": self.cmd_lock, "unlock": self.cmd_unlock}
+        if value in no_target:
+            await request_confirmation(
+                interaction, title=f"確認{'鎖定' if value == 'lock' else '解鎖'}頻道",
+                description="將修改目前臨時語音頻道的連線權限。",
+                action=no_target[value],
+            )
+            return
+        if member is None:
+            await interaction.response.send_message("此操作必須選擇目標成員。", ephemeral=True)
+            return
+        callbacks = {
+            "permit": self.cmd_permit, "reject": self.cmd_reject,
+            "kick": self.cmd_kick, "transfer": self.cmd_transfer,
+        }
+        await request_confirmation(
+            interaction,
+            title={"permit": "確認允許成員", "reject": "確認拒絕成員", "kick": "確認踢出成員", "transfer": "確認轉移所有權"}[value],
+            description=f"目標成員：{member.mention}",
+            action=lambda click: callbacks[value](click, member),
+        )
 
     # ── 權限驗證工具 ──────────────────────
 
@@ -276,16 +362,6 @@ class VoiceChannel(commands.Cog):
 
     # ── /vc setup ──────────────────────
 
-    @vc_group.command(name="setup", description="設定「加入即建立」語音頻道")
-    @app_commands.describe(
-        channel  = "作為觸發器的語音頻道（成員加入此頻道即自動建立臨時頻道）",
-        category = "臨時頻道所屬的類別（預設和觸發頻道同一類別）",
-        template = "頻道名稱範本，{username} 會替換為成員名稱",
-        limit    = "預設人數上限（0 = 無上限）",
-    )
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.checks.bot_has_permissions(manage_channels=True, move_members=True)
     async def cmd_setup(
         self,
         interaction: discord.Interaction,
@@ -320,8 +396,6 @@ class VoiceChannel(commands.Cog):
 
     # ── /vc name ──────────────────────
 
-    @vc_group.command(name="name", description="更改您的臨時頻道名稱")
-    @app_commands.describe(name="新的頻道名稱（最長 100 字元）")
     async def cmd_name(
         self,
         interaction: discord.Interaction,
@@ -342,8 +416,6 @@ class VoiceChannel(commands.Cog):
 
     # ── /vc limit ──────────────────────
 
-    @vc_group.command(name="limit", description="設定頻道人數上限（0 = 無上限）")
-    @app_commands.describe(limit="人數上限（0-99，0 為無上限）")
     async def cmd_limit(
         self,
         interaction: discord.Interaction,
@@ -365,7 +437,6 @@ class VoiceChannel(commands.Cog):
 
     # ── /vc lock ──────────────────────
 
-    @vc_group.command(name="lock", description="鎖定頻道，阻止新成員進入")
     async def cmd_lock(self, interaction: discord.Interaction) -> None:
         channel = await self._get_owner_channel(interaction)
         if channel is None:
@@ -385,7 +456,6 @@ class VoiceChannel(commands.Cog):
 
     # ── /vc unlock ──────────────────────
 
-    @vc_group.command(name="unlock", description="解鎖頻道，恢復正常進入")
     async def cmd_unlock(self, interaction: discord.Interaction) -> None:
         channel = await self._get_owner_channel(interaction)
         if channel is None:
@@ -405,8 +475,6 @@ class VoiceChannel(commands.Cog):
 
     # ── /vc permit ──────────────────────
 
-    @vc_group.command(name="permit", description="允許指定成員進入已鎖定的頻道")
-    @app_commands.describe(member="要允許進入的成員")
     async def cmd_permit(
         self,
         interaction: discord.Interaction,
@@ -428,8 +496,6 @@ class VoiceChannel(commands.Cog):
 
     # ── /vc reject ──────────────────────
 
-    @vc_group.command(name="reject", description="禁止指定成員進入此頻道")
-    @app_commands.describe(member="要禁止進入的成員")
     async def cmd_reject(
         self,
         interaction: discord.Interaction,
@@ -458,8 +524,6 @@ class VoiceChannel(commands.Cog):
 
     # ── /vc kick ──────────────────────
 
-    @vc_group.command(name="kick", description="將成員踢出您的頻道")
-    @app_commands.describe(member="要踢出的成員")
     async def cmd_kick(
         self,
         interaction: discord.Interaction,
@@ -491,8 +555,6 @@ class VoiceChannel(commands.Cog):
 
     # ── /vc transfer ──────────────────────
 
-    @vc_group.command(name="transfer", description="將頻道所有權轉移給其他成員")
-    @app_commands.describe(member="要轉移所有權的對象（必須在頻道內）")
     async def cmd_transfer(
         self,
         interaction: discord.Interaction,
@@ -531,7 +593,6 @@ class VoiceChannel(commands.Cog):
 
     # ── /vc info ──────────────────────
 
-    @vc_group.command(name="info", description="查看目前臨時頻道的設定")
     async def cmd_info(self, interaction: discord.Interaction) -> None:
         member = interaction.user
         if not isinstance(member, discord.Member):
@@ -568,11 +629,6 @@ class VoiceChannel(commands.Cog):
 
     # ── /vc forcedelete（管理員強制刪除） ──────────────────────
 
-    @vc_group.command(name="forcedelete", description="管理員強制刪除指定臨時頻道")
-    @app_commands.describe(channel="要強制刪除的語音頻道")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.checks.bot_has_permissions(manage_channels=True)
     async def cmd_forcedelete(
         self,
         interaction: discord.Interaction,

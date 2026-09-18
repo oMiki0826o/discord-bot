@@ -131,10 +131,11 @@ async def _exec_memory(user_id: str, channel_id: str, query: str) -> str:
 
 
 async def _exec_summary(user_id: str, channel_id: str, query: str) -> str:
-    """channel_id / query 目前用不到，僅為符合共用的 ExecutorFn 簽名而保留。"""
+    """只取得目前頻道的對話摘要，避免跨頻道串台。"""
     try:
         from core.ai.memory_manager import get_summary_text
-        s = await get_summary_text(user_id)
+        from core.ai.context_filter import select_summary
+        s = select_summary(await get_summary_text(user_id, channel_id), query)
         return f"=== 工具：對話摘要 ===\n{s}" if s else ""
     except Exception as e:
         logger.debug("[tool_registry] summary executor error: %s", e)
@@ -145,7 +146,8 @@ async def _exec_profile(user_id: str, channel_id: str, query: str) -> str:
     """channel_id / query 目前用不到，僅為符合共用的 ExecutorFn 簽名而保留。"""
     try:
         from core.ai.user_context import profile_to_prompt
-        return await profile_to_prompt(user_id)
+        from core.ai.context_filter import select_profile
+        return select_profile(await profile_to_prompt(user_id), query)
     except Exception as e:
         logger.debug("[tool_registry] profile executor error: %s", e)
     return ""

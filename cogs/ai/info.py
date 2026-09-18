@@ -68,7 +68,8 @@ class Info(commands.Cog):
         embed.add_field(
             name  = "錯誤 / 快取",
             value = (
-                f"錯誤次數：{stats['error_count']}\n"
+                f"請求失敗：{stats['error_count']}\n"
+                f"供應商異常：{stats['provider_error_count']}\n"
                 f"錯誤率：{stats['error_rate'] * 100:.1f}%\n"
                 f"快取命中：{stats['cache_hits']} 次"
             ),

@@ -7,9 +7,10 @@ from collections.abc import Awaitable, Callable
 
 import discord
 
-from core.system.settings import get_float, get_int
+from core.system.settings import get_float
 
 MessageSender = Callable[[str], Awaitable[discord.Message]]
+DISCORD_SAFE_MESSAGE_LIMIT = 1_900
 
 
 class StreamingResponse:
@@ -20,12 +21,8 @@ class StreamingResponse:
         self._message: discord.Message | None = None
         self._last_content = ""
         self._last_update = 0.0
-        # Discord 單則訊息硬上限為 2000；預留空間給 code fence 與提示。
-        self._max_length = min(
-            1_900,
-            max(200, get_int("ai.max_reply_length", 1500)),
-        )
-        self._max_chunks = max(1, get_int("ai.long_reply_max_chunks", 4))
+        # Discord 單則訊息硬上限為 2000；固定預留 100 字元安全空間。
+        self._max_length = DISCORD_SAFE_MESSAGE_LIMIT
         self._interval = max(
             0.25,
             get_float("ai.stream_update_interval_seconds", 1.0),
@@ -64,14 +61,14 @@ class StreamingResponse:
         """
         確保最終文字已發送。
 
-        可容納的長文會按自然邊界拆成數則訊息；超過安全訊息數時保留
-        第一段預覽並回傳 False，讓呼叫端另外附上完整文字檔。
+        超過單則安全長度時不再切割成多則 Discord 訊息，避免 Markdown
+        code fence 或段落被切壞；改保留第一段預覽並回傳 False，讓呼叫端
+        另外附上完整文字檔。
         """
         if not content or not content.strip():
             return False
 
-        chunks = split_discord_text(content, self._max_length)
-        if len(chunks) > self._max_chunks:
+        if len(content) > self._max_length:
             notice = "\n\n（完整回覆請見下方附件）"
             preview = content[: self._max_length - len(notice)].rstrip() + notice
             if self._message is None:
@@ -81,49 +78,9 @@ class StreamingResponse:
             self._last_content = preview
             return False
 
-        if len(chunks) > 1:
-            first, *remaining = chunks
-            if self._message is None:
-                self._message = await self._sender(first)
-            elif first != self._last_content:
-                await self._message.edit(content=first)
-            for chunk in remaining:
-                await self._sender(chunk)
-            self._last_content = first
-            return True
-
         if self._message is None:
             self._message = await self._sender(content)
         elif content != self._last_content:
             await self._message.edit(content=content)
         self._last_content = content
         return True
-
-
-def split_discord_text(text: str, limit: int) -> list[str]:
-    """優先在段落、換行或空白處拆分 Discord 長文。"""
-    if not text:
-        return []
-    limit = max(1, limit)
-    chunks: list[str] = []
-    remaining = text.strip()
-
-    while len(remaining) > limit:
-        window = remaining[: limit + 1]
-        minimum = max(1, limit // 2)
-        cut = -1
-        for boundary in ("\n\n", "\n", "。", "！", "？", ". ", " "):
-            position = window.rfind(boundary, minimum)
-            if position >= 0:
-                cut = position + len(boundary)
-                break
-        if cut <= 0:
-            cut = limit
-        chunk = remaining[:cut].rstrip()
-        if chunk:
-            chunks.append(chunk)
-        remaining = remaining[cut:].lstrip()
-
-    if remaining:
-        chunks.append(remaining)
-    return chunks

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -13,6 +14,17 @@ import core.ai.core as ai_core
 import core.ai.streaming_response as streaming_module
 from core.ai.streaming_response import StreamingResponse
 from core.system import event_bus
+
+
+def test_event_bus_handler_error_is_visible(caplog) -> None:
+    async def broken_handler(**_kwargs):
+        raise RuntimeError("event handler exploded")
+
+    with caplog.at_level(logging.ERROR, logger="bot.system.event_bus"):
+        asyncio.run(event_bus._safe_call(broken_handler, "test_event"))
+
+    assert "handler=broken_handler" in caplog.text
+    assert "event handler exploded" in caplog.text
 
 
 def test_streaming_call_emits_accumulated_text(monkeypatch) -> None:
@@ -79,7 +91,6 @@ def test_model_pool_stops_at_configured_attempt_limit(monkeypatch) -> None:
 def test_discord_stream_updates_one_message_and_flushes_final_text(monkeypatch) -> None:
     message = SimpleNamespace(edit=AsyncMock(), delete=AsyncMock())
     sender = AsyncMock(return_value=message)
-    monkeypatch.setattr(streaming_module, "get_int", lambda *_args: 1500)
     monkeypatch.setattr(streaming_module, "get_float", lambda *_args: 60.0)
 
     async def run() -> None:
@@ -94,48 +105,38 @@ def test_discord_stream_updates_one_message_and_flushes_final_text(monkeypatch) 
     message.edit.assert_awaited_once_with(content="ABC")
 
 
-def test_long_response_is_split_into_multiple_discord_messages(monkeypatch) -> None:
-    first_message = SimpleNamespace(edit=AsyncMock(), delete=AsyncMock())
-    other_message = SimpleNamespace(edit=AsyncMock(), delete=AsyncMock())
-    sender = AsyncMock(side_effect=[first_message, other_message, other_message])
-    monkeypatch.setattr(
-        streaming_module,
-        "get_int",
-        lambda path, default=0: 200 if path == "ai.max_reply_length" else 4,
-    )
+def test_response_within_discord_safe_limit_stays_in_one_message(monkeypatch) -> None:
+    message = SimpleNamespace(edit=AsyncMock(), delete=AsyncMock())
+    sender = AsyncMock(return_value=message)
     monkeypatch.setattr(streaming_module, "get_float", lambda *_args: 60.0)
 
     async def run() -> None:
         response = StreamingResponse(sender)
         await response.push("開頭")
-        assert await response.finish("段落。" * 100) is True
+        assert await response.finish("段落。" * 300) is True
 
     asyncio.run(run())
 
-    assert first_message.edit.await_count == 1
-    assert sender.await_count >= 2
-    assert all(len(call.args[0]) <= 200 for call in sender.await_args_list)
+    sender.assert_awaited_once_with("開頭")
+    message.edit.assert_awaited_once()
 
 
 def test_very_long_response_keeps_preview_for_attachment_fallback(monkeypatch) -> None:
     message = SimpleNamespace(edit=AsyncMock(), delete=AsyncMock())
     sender = AsyncMock(return_value=message)
-    monkeypatch.setattr(
-        streaming_module,
-        "get_int",
-        lambda path, default=0: 200 if path == "ai.max_reply_length" else 2,
-    )
     monkeypatch.setattr(streaming_module, "get_float", lambda *_args: 60.0)
 
     async def run() -> None:
         response = StreamingResponse(sender)
         await response.push("預覽")
-        assert await response.finish("很長。" * 300) is False
+        assert await response.finish("很長。" * 700) is False
 
     asyncio.run(run())
 
     message.delete.assert_not_awaited()
-    assert "完整回覆請見下方附件" in message.edit.await_args.kwargs["content"]
+    preview = message.edit.await_args.kwargs["content"]
+    assert len(preview) <= streaming_module.DISCORD_SAFE_MESSAGE_LIMIT
+    assert "完整回覆請見下方附件" in preview
 
 
 def test_model_retry_resets_previous_stream(monkeypatch) -> None:

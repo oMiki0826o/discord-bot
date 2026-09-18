@@ -2,9 +2,8 @@
 cogs/utility/favorites.py
 
 職責：
-- 使用者音樂收藏清單（/favorite）
-- /favorite add：加入單曲收藏（僅接受 URL）
-- /favorite list：顯示個人收藏清單，並用下拉選單播放、刪除或清空收藏
+- 使用者音樂收藏清單（由 /music 面板進入）
+- 加入、顯示、播放、刪除或清空個人收藏
 
 Modification():
 
@@ -12,6 +11,7 @@ Modification():
   播放、刪除與清空改放在 /favorite list 的互動面板。
 - /favorite add 改為僅接受 http(s) 單曲 URL，拒絕 playlist URL 與搜尋關鍵字。
 - 移除舊 /fav menu、/fav play、/fav remove、/fav clear 的死碼與互動類別。
+- 移除 /favorite Slash 群組，收藏功能完整收旂至 /music。
 
 """
 
@@ -22,7 +22,6 @@ import re
 from urllib.parse import parse_qs, urlparse
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 import database.repository.favorites_repository as fav_repo
@@ -88,7 +87,7 @@ def _fav_embed(
         color = discord.Color.gold(),
     )
     if not favorites:
-        embed.description = "收藏清單是空的，使用 `/favorite add` 加入歌曲"
+        embed.description = "收藏清單是空的，請從 `/music` 面板加入歌曲"
     else:
         lines = [
             f"`{start+i+1}.` [{s['title']}]({s['url']}) `{format_duration(s['duration'])}`"
@@ -247,16 +246,7 @@ class Favorites(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    fav_group = app_commands.Group(name="favorite", description="音樂收藏清單")
-
     # ── /favorite add ──────────────────────
-
-    @fav_group.command(name="add", description="加入單曲收藏")
-    @app_commands.describe(url="YouTube 單曲 URL")
-    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-    async def cmd_add(self, interaction: discord.Interaction, url: str) -> None:
-        await interaction.response.defer(ephemeral=True)
-        await self.add_by_query(interaction, interaction.user, url)
 
     async def add_by_query(
         self,
@@ -284,7 +274,7 @@ class Favorites(commands.Cog):
             return
         if _is_playlist_url(query):
             await interaction.followup.send(
-                embed=error_embed("收藏僅限單曲 URL，播放清單請使用 /play 的歌單選項播放"),
+                embed=error_embed("收藏僅限單曲 URL，播放清單請手動選擇 /play 的歌單模式"),
                 ephemeral=True,
             )
             return
@@ -307,16 +297,6 @@ class Favorites(commands.Cog):
 
     # ── /favorite list ──────────────────────
 
-    @fav_group.command(name="list", description="查看個人收藏清單")
-    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-    async def cmd_list(self, interaction: discord.Interaction) -> None:
-        favs = await fav_repo.get_favorites(str(interaction.user.id))
-        await interaction.response.send_message(
-            embed = _fav_embed(interaction.user, favs, 1),
-            view  = FavoriteListView(self, interaction.user, favs) if favs else None,
-            ephemeral = True,
-        )
-
     # ── 收藏播放核心 ──────────────────────
 
     async def play_favorite_core(
@@ -329,7 +309,7 @@ class Favorites(commands.Cog):
         執行「播放指定收藏」核心邏輯（0-based index），回傳 (embed, view)。
         view 為 None 時代表錯誤情況，呼叫端應以 ephemeral 顯示。
         """
-        from core.music.embeds import added_song_embed, error_embed, now_playing_embed
+        from core.music.embeds import added_song_embed, error_embed, info_embed, now_playing_embed
         from core.music.views  import MusicControls
 
         _, fav = await _get_favorite_at(str(member.id), index)
@@ -337,6 +317,7 @@ class Favorites(commands.Cog):
             return error_embed("找不到該筆收藏，可能已被移除或編號錯誤"), None
 
         player = get_player(self.bot, member.guild)
+        was_active = player.is_active
         try:
             await player.connect(member.voice.channel)
             song = await player.add_song(fav["url"], member, interaction.channel)
@@ -344,9 +325,21 @@ class Favorites(commands.Cog):
             logger.exception("[fav.play] 播放失敗 url=%s", fav["url"])
             return error_embed(f"播放失敗：{exc}"), None
 
-        if player.queue.size > 0:
+        if was_active:
             return added_song_embed(song, player.queue.size), MusicControls(player)
-        return now_playing_embed(song, player.queue), MusicControls(player)
+
+        # 收藏面板是私人訊息；新開始播放時另外發送公開的目前播放。
+        if interaction.channel is None:
+            return error_embed("已開始播放，但找不到可發送公開通知的文字頻道"), None
+        try:
+            await interaction.channel.send(
+                embed=now_playing_embed(song, player.queue),
+                view=MusicControls(player),
+            )
+        except discord.HTTPException as exc:
+            logger.warning("[fav.play] 無法發送公開的目前播放通知: %s", exc)
+            return error_embed("已開始播放，但 Bot 無法在此頻道發送公開通知"), None
+        return info_embed(f"已開始播放：{song.title}（公開通知已發送）"), None
 
     # ── 收藏刪除核心 ──────────────────────
 

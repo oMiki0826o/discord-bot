@@ -30,6 +30,7 @@ import logging
 from dataclasses import dataclass, field
 
 from core.ai.agent_router import RouteDecision
+from core.ai.context_filter import select_profile, select_summary
 from core.ai.file_parser.models import ParsedFile
 from core.ai.memory_manager import search as memory_search
 from core.system.settings import get_int
@@ -53,7 +54,9 @@ class ContextBundle:
     """
     user_input:      str
     user_info:       dict
+    channel_id:      str                              = ""
     memories:        list[tuple[str, str, int]]      = field(default_factory=list)
+    memory_details:  list[dict]                       = field(default_factory=list)
     messages:        list[tuple[str, str]]            = field(default_factory=list)
     recent:          list[tuple[str, str]]            = field(default_factory=list)
     summary:         str                              = ""
@@ -62,7 +65,13 @@ class ContextBundle:
     profile_section: str                              = ""
     files:           list[ParsedFile]                 = field(default_factory=list)
     security_notice: bool                             = False
-    max_length:      int                              = 12_000
+    injection_risk:  str                              = "none"
+    reply_reference: dict | None                      = None
+    channel_messages: list[dict]                      = field(default_factory=list)
+    channel_context_max_tokens: int                   = 6_000
+    max_tokens:      int                              = 32_768
+    # 舊版測試／外部呼叫的字元預算相容欄位；新流程不設定它。
+    max_length:      int | None                       = None
 
 # ── 主要入口 ──────────────────────
 
@@ -76,6 +85,9 @@ async def build(
     cached_search:      str | None = None,
     files:              list[ParsedFile] | None = None,
     user_info:          dict | None = None,
+    injection_risk:     str = "none",
+    reply_reference:    dict | None = None,
+    channel_messages:   list[dict] | None = None,
 ) -> ContextBundle:
     """
     組裝 ContextBundle：
@@ -106,6 +118,11 @@ async def build(
     if user_task is not None:
         user_info = await user_task
 
+    # Profile 的風格／語言偏好可常駐，主題、備註與舊摘要則需要
+    # 與目前問題相關，避免日常閒聊被舊專案、天氣或待辦污染。
+    profile_sec = select_profile(profile_sec, clean)
+    selected_summary = select_summary(mem_bundle.summary, clean)
+
     # ── 快取搜尋結果注入為最優先 tool_section ──────────────────────
     if cached_search:
         tool_secs.insert(0, f"=== 快取搜尋結果 ===\n{cached_search[:1_000]}")
@@ -123,16 +140,24 @@ async def build(
     return ContextBundle(
         user_input      = clean,
         user_info       = user_info,
+        channel_id      = channel_id,
         memories        = mem_bundle.memories,
+        memory_details  = getattr(mem_bundle, "memory_details", []),
         messages        = mem_bundle.messages,
         recent          = mem_bundle.recent,
-        summary         = mem_bundle.summary,
+        summary         = selected_summary,
         tool_sections   = tool_secs,
         state_section   = state_sec,
         profile_section = profile_sec,
         files           = files or [],
         security_notice = injection_detected,
-        max_length      = max(1_000, get_int("ai.prompt_max_chars", 8_000)),
+        injection_risk  = injection_risk,
+        reply_reference = reply_reference,
+        channel_messages = channel_messages or [],
+        channel_context_max_tokens = max(
+            500, get_int("ai.channel_context_token_limit", 6_000),
+        ),
+        max_tokens      = max(4_096, get_int("ai.prompt_max_tokens", 32_768)),
     )
 
 # ── 內部工具 ──────────────────────
@@ -151,5 +176,19 @@ async def _get_tools(
     呼叫時少一個參數、導致參數整個錯位的問題（詳見 tool_registry.py
     與 agent_router.py 的說明）。
     """
-    from core.ai.agent_router import execute_tools
-    return await execute_tools(route, user_id, channel_id, query)
+    from core.ai.agent_router import RouteDecision, execute_tools
+
+    # memory / summary / profile 已由本模組同一次並行查詢取得；再次透過
+    # tool executor 查詢只會增加 DB I/O，並可能因完成時間不同注入兩份
+    # 不一致的記憶。保留路由判斷，但只執行真正的外部工具。
+    internal = {"memory", "summary", "profile"}
+    external_tools = [name for name in route.tools if name not in internal]
+    if not external_tools:
+        return []
+    external_route = RouteDecision(
+        model=route.model,
+        use_search=route.use_search,
+        tools=external_tools,
+        category=route.category,
+    )
+    return await execute_tools(external_route, user_id, channel_id, query)

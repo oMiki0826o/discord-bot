@@ -39,7 +39,7 @@ from core.ai.budget import record_error, record_usage
 from core.ai.context_manager import build as build_context
 from core.ai.file_parser.models import ParsedFile
 from core.ai.gemini_client import client
-from core.ai.memory_manager import save_message
+from core.ai.memory_manager import save_conversation_turn
 from core.ai.models import (
     MULTIMODAL_CATEGORY,
     get_model_candidates,
@@ -48,11 +48,15 @@ from core.ai.models import (
 )
 from core.ai.prompt_builder import build as build_prompt
 from core.ai.prompt_builder import get_system_prompt
+from core.ai.prompt_logging import redact_prompt, send_prompt_to_discord
+from core.ai.token_budget import estimate_tokens
 from core.ai.quota_manager import (
     MODEL_QUOTA_UNTIL as _MODEL_QUOTA_UNTIL,
     clear_quota_cooldown,
+    error_status_code,
     foreground_request,
     mark_quota_exhausted,
+    mark_quota_exhausted_from_error,
     quota_remaining,
 )
 from core.ai.search_manager import check_cache, save_result
@@ -62,7 +66,7 @@ from core.ai.user_context import (
     is_banned,
 )
 from core.system import event_bus
-from core.system.settings import get_float, get_int
+from core.system.settings import get_bool, get_float, get_int
 from utils.ai.prompt_guard import sanitize_prompt
 
 logger = logging.getLogger("bot.ai.core")
@@ -78,6 +82,16 @@ ChunkCallback = Callable[[str], Awaitable[None]]
 RetryCallback = Callable[[], Awaitable[None]]
 
 # ── 內部工具 ──────────────────────
+
+async def _notify_retry(callback: RetryCallback | None, model: str) -> None:
+    """通知 Discord 重置串流訊息；通知失敗不影響模型重試。"""
+    if callback is None:
+        return
+    try:
+        await callback()
+    except Exception as e:
+        logger.warning("[stream_retry_reset] model=%s error=%s", model, e)
+
 
 def _get_block_reason(res) -> str | None:
     feedback = getattr(res, "prompt_feedback", None)
@@ -211,13 +225,15 @@ async def _try_generate(
     image_parts:   Sequence[types.Part] | None = None,
     max_retries:   int | None = None,
     on_chunk:      ChunkCallback | None = None,
+    on_retry:      RetryCallback | None = None,
 ) -> str | object | None:
     """
     回傳：str → 成功 | _BLOCKED → 安全過濾 | _MALFORMED → 格式錯誤 | None → 可重試
     """
     contents = _build_contents(model, system_prompt, prompt, image_parts)
     if max_retries is None:
-        max_retries = max(1, get_int("ai.model_server_retries", 1))
+        max_retries = max(1, get_int("ai.model_server_retries", 2))
+    last_server_error: ServerError | None = None
 
     for attempt in range(max_retries):
         try:
@@ -254,36 +270,61 @@ async def _try_generate(
                 "[timeout] user=%s model=%s attempt=%d/%d",
                 user_id, model, attempt + 1, max_retries,
             )
+            if attempt < max_retries - 1:
+                await _notify_retry(on_retry, model)
+                continue
             record_error("timeout", user_id, model)
             return None
 
         except ServerError as e:
+            last_server_error = e
             logger.warning(
-                "[server_error] user=%s model=%s attempt=%d/%d error=%s",
+                "[http_error] status=%s type=server_error user=%s model=%s "
+                "attempt=%d/%d error=%s",
+                error_status_code(e) or "unknown",
                 user_id, model, attempt + 1, max_retries, e,
             )
+            # Service errors are retried immediately by policy. If the retry
+            # also fails, the model pool rotates without an artificial delay.
             if attempt < max_retries - 1:
-                await asyncio.sleep(2)
+                await _notify_retry(on_retry, model)
+            continue
 
         except ClientError as e:
             err = str(e)
             if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                retry_after = mark_quota_exhausted_from_error(model, e)
                 logger.warning(
-                    "[quota] user=%s model=%s，切換模型池下一個",
-                    user_id, model,
+                    "[http_error] status=429 type=quota_exceeded user=%s "
+                    "model=%s retry_after=%ds action=rotate_model error=%s",
+                    user_id, model, retry_after, e,
                 )
                 record_error("quota_exceeded", user_id, model)
                 return _QUOTA_EXHAUSTED
             logger.error(
-                "[client_error] user=%s model=%s error=%s", user_id, model, e,
+                "[http_error] status=%s type=client_error user=%s model=%s error=%s",
+                error_status_code(e) or "unknown", user_id, model, e,
             )
             record_error("client_error", user_id, model)
             return None
 
-    logger.error(
-        "[failed] user=%s model=%s retries=%d exhausted",
-        user_id, model, max_retries,
-    )
+    if last_server_error is not None:
+        status = error_status_code(last_server_error)
+        logger.error(
+            "[http_error] status=%s type=server_error user=%s model=%s "
+            "retries=%d exhausted error=%s",
+            status or "unknown", user_id, model, max_retries, last_server_error,
+        )
+        record_error(
+            f"server_error_{status}" if status is not None else "server_error",
+            user_id,
+            model,
+        )
+    else:
+        logger.error(
+            "[failed] user=%s model=%s retries=%d exhausted",
+            user_id, model, max_retries,
+        )
     return None
 
 
@@ -327,10 +368,7 @@ async def _try_model_pool(
             )
             break
         if attempts > 0 and on_retry is not None:
-            try:
-                await on_retry()
-            except Exception as e:
-                logger.warning("[stream_retry_reset] model=%s error=%s", model, e)
+            await _notify_retry(on_retry, model)
         attempts += 1
 
         logger.info(
@@ -345,9 +383,13 @@ async def _try_model_pool(
             system_prompt,
             image_parts=image_parts,
             on_chunk=on_chunk,
+            on_retry=on_retry,
         )
         if result is _QUOTA_EXHAUSTED:
-            mark_quota_exhausted(model)
+            # Real 429 responses already apply the provider's retryDelay in
+            # _try_generate. Keep this fallback for tests/custom providers.
+            if quota_remaining(model) <= 0:
+                mark_quota_exhausted(model)
         elif result is not None:
             clear_quota_cooldown(model)
 
@@ -374,6 +416,8 @@ async def generate(
     model_override: str | None = None,
     on_chunk: ChunkCallback | None = None,
     on_retry: RetryCallback | None = None,
+    reply_reference: dict | None = None,
+    channel_messages: list[dict] | None = None,
 ) -> str:
     request_started = perf_counter()
     user_id  = str(user.id)
@@ -401,8 +445,9 @@ async def generate(
     clean = guard.cleaned
 
     logger.debug(
-        "[prompt_guard] user=%s injection=%s pattern=%r input_len=%d",
-        user_id, guard.injection_detected, guard.matched_pattern, len(clean),
+        "[prompt_guard] user=%s risk=%s injection=%s pattern=%r input_len=%d",
+        user_id, guard.risk_level, guard.injection_detected,
+        guard.matched_pattern, len(clean),
     )
 
     if not clean:
@@ -466,18 +511,51 @@ async def generate(
         cached_search      = cached_search,
         files              = parsed_files,
         user_info          = user_info,
+        injection_risk     = guard.risk_level,
+        reply_reference    = reply_reference,
+        channel_messages   = channel_messages,
     )
     context_elapsed = perf_counter() - context_started
 
     # ── Prompt 組裝 ──────────────────────
     system_prompt = get_system_prompt()
+    system_tokens = estimate_tokens(system_prompt)
+    bundle.max_tokens = max(512, bundle.max_tokens - system_tokens)
     final_prompt  = build_prompt(bundle)
+    final_tokens  = estimate_tokens(final_prompt)
 
     logger.info(
-        "[call] user=%s category=%s primary=%s search=%s prompt_len=%d",
+        "[call] user=%s category=%s primary=%s search=%s prompt_chars=%d "
+        "prompt_tokens_est=%d system_tokens_est=%d",
         user_id, decision.category, decision.model,
-        decision.use_search, len(final_prompt),
+        decision.use_search, len(final_prompt), final_tokens, system_tokens,
     )
+
+    # ── 選用的完整 Prompt 紀錄 ──────────────────────
+    # 同時保留 system prompt 與最終 context prompt，才等同於模型實際收到的
+    # 指令。Discord 投遞失敗只記 warning，不應中斷正常 AI 回覆。
+    if get_bool("ai.show_prompt", False):
+        logger.info(
+            "[prompt_dump] user=%s(%s) channel=%s model=%s\n"
+            "===== SYSTEM PROMPT =====\n%s\n\n"
+            "===== FINAL PROMPT =====\n%s",
+            user_id, username, channel_id or "未知", decision.model,
+            redact_prompt(system_prompt), redact_prompt(final_prompt),
+        )
+        try:
+            await send_prompt_to_discord(
+                user_id=user_id,
+                username=username,
+                source_channel_id=channel_id,
+                model=decision.model,
+                system_prompt=system_prompt,
+                final_prompt=final_prompt,
+            )
+        except Exception as e:
+            logger.warning(
+                "[prompt_dump] Discord 紀錄頻道投遞失敗 target=%s: %s",
+                get_int("ai.prompt_log_channel_id", 1550078091949506622), e,
+            )
 
     # ── API 呼叫 ──────────────────────
     model_started = perf_counter()
@@ -553,9 +631,11 @@ async def _persist_and_emit(
     channel_id: str,
 ) -> None:
     """背景儲存對話，完成後再觸發依賴新訊息的記憶與個人檔案任務。"""
-    await asyncio.gather(
-        save_message(user_id, "user", user_msg, channel_id),
-        save_message(user_id, "assistant", ai_msg[:2_000], channel_id),
+    user_message_id, _assistant_message_id = await save_conversation_turn(
+        user_id,
+        user_msg,
+        ai_msg[:2_000],
+        channel_id,
     )
     await increment_interaction(user_id)
     await event_bus.emit(
@@ -564,4 +644,6 @@ async def _persist_and_emit(
         username=username,
         user_msg=user_msg,
         ai_msg=ai_msg,
+        channel_id=channel_id,
+        user_message_id=user_message_id,
     )

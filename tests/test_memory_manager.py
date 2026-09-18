@@ -88,15 +88,28 @@ def test_search_cache_key_distinguishes_channel(fresh_db):
     _run(_test())
 
 
-def test_count_messages_is_not_channel_filtered(fresh_db):
+def test_count_messages_supports_global_and_channel_scope(fresh_db):
     """
-    count_messages() 刻意不依 channel_id 過濾（_MSG_LIMIT 清理與
-    摘要觸發判斷以使用者整體為單位），確認這個設計沒有被意外改動。
+    舊的全域計數保留給清理邏輯，摘要則能依頻道計數。
     """
     async def _test():
         await memory_manager.save_message("u1", "user", "頻道A訊息", "channelA")
         await memory_manager.save_message("u1", "user", "頻道B訊息", "channelB")
         assert await mem_repo.count_messages("u1") == 2
+        assert await mem_repo.count_messages("u1", "channelA") == 1
+        assert await mem_repo.count_messages("u1", "channelB") == 1
+
+    _run(_test())
+
+
+def test_summaries_are_isolated_by_channel(fresh_db):
+    async def _test():
+        await mem_repo.upsert_summary("u1", "A 頻道摘要", 20, "channelA")
+        await mem_repo.upsert_summary("u1", "B 頻道摘要", 30, "channelB")
+
+        assert await mem_repo.get_summary("u1", "channelA") == "A 頻道摘要"
+        assert await mem_repo.get_summary("u1", "channelB") == "B 頻道摘要"
+        assert await mem_repo.get_summary("u1") == ""
 
     _run(_test())
 

@@ -101,13 +101,26 @@ def test_get_user_stats_groups_by_model(fresh_db):
     assert stats["by_model"]["model_a"]["requests"] == 2
 
 
-def test_record_error_increments_error_count(fresh_db):
+def test_provider_error_does_not_inflate_request_failure_rate(fresh_db):
     budget.record_usage("u1", "model_a", input_text="ok")
     budget.record_error("timeout", user_id="u1", model="model_a")
 
     stats = budget.get_global_stats(hours=24)
+    assert stats["error_count"] == 0
+    assert stats["provider_error_count"] == 1
+    assert stats["error_rate"] == 0
+
+
+def test_give_up_counts_as_one_request_failure(fresh_db):
+    budget.record_usage("u1", "model_a", input_text="ok")
+    budget.record_error("quota_exceeded", user_id="u2", model="model_a")
+    budget.record_error("server_error_503", user_id="u2", model="model_b")
+    budget.record_error("give_up", user_id="u2", model="model_b")
+
+    stats = budget.get_global_stats(hours=24)
     assert stats["error_count"] == 1
-    assert stats["error_rate"] > 0
+    assert stats["provider_error_count"] == 2
+    assert stats["error_rate"] == 0.5
 
 
 def test_get_top_users_orders_by_token_descending(fresh_db):

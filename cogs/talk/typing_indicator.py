@@ -2,8 +2,7 @@
 cogs/talk/typing_indicator.py
 
 職責：
-- /typing：讓 Bot 在目前頻道持續顯示「正在輸入...」指示器
-- /typing_stop：停止輸入指示器
+- /typing：以下拉選項開啟或關閉目前頻道的「正在輸入...」指示器
 
 Modification():
 
@@ -12,8 +11,8 @@ Modification():
 - 加入 from __future__ import annotations
 - 檔名改為 typing_indicator.py 避免與標準庫 typing 衝突
 
-- /typing 與 /typing_stop 同時使用 default_permissions 與執行期
-  has_permissions，並限制於伺服器頻道。
+- /typing 使用 action 下拉選單整合開啟與關閉，並同時使用
+  default_permissions 與執行期 has_permissions，限制於伺服器頻道。
 
 """
 
@@ -51,28 +50,33 @@ class TypingIndicator(commands.Cog):
         except asyncio.CancelledError:
             pass
 
-    @app_commands.command(name="typing", description="讓 Bot 持續顯示正在輸入")
+    @app_commands.command(name="typing", description="開啟或關閉 Bot 的輸入指示器")
+    @app_commands.describe(action="選擇開啟或關閉")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="開啟", value="start"),
+        app_commands.Choice(name="關閉", value="stop"),
+    ])
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_messages=True)
     @app_commands.checks.has_permissions(manage_messages=True)
     @app_commands.checks.bot_has_permissions(send_messages=True)
-    async def cmd_typing_start(self, interaction: discord.Interaction) -> None:
+    async def cmd_typing(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+    ) -> None:
         ch_id = interaction.channel_id
-        if ch_id in self._tasks:
-            await interaction.response.send_message("此頻道已在 typing。", ephemeral=True)
+        if action.value == "start":
+            if ch_id in self._tasks:
+                await interaction.response.send_message("此頻道已在 typing。", ephemeral=True)
+                return
+            self._tasks[ch_id] = asyncio.create_task(
+                self._typing_loop(interaction.channel)
+            )
+            logger.info("[typing] 開始 channel=%d", ch_id)
+            await interaction.response.send_message("已開始 typing。", ephemeral=True)
             return
-        self._tasks[ch_id] = asyncio.create_task(
-            self._typing_loop(interaction.channel)
-        )
-        logger.info("[typing] 開始 channel=%d", ch_id)
-        await interaction.response.send_message("已開始 typing。", ephemeral=True)
 
-    @app_commands.command(name="typing_stop", description="停止 Bot 的輸入指示器")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(manage_messages=True)
-    @app_commands.checks.has_permissions(manage_messages=True)
-    async def cmd_typing_stop(self, interaction: discord.Interaction) -> None:
-        ch_id = interaction.channel_id
         task  = self._tasks.pop(ch_id, None)
         if not task:
             await interaction.response.send_message("目前沒有在 typing。", ephemeral=True)

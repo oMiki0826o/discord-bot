@@ -22,11 +22,19 @@ Modification():
 
 from __future__ import annotations
 
+import io
+
 import discord
 from discord.ext import commands
 
 from core.ai.abuse_guard import clear_restriction, is_restricted
 from core.ai.admin_service import log_admin_action
+from core.ai.memory_exporter import render_table_snapshot, render_user_memory
+from database.repository.inspection_repository import (
+    get_database_overview,
+    get_table_snapshot,
+    get_user_memory_snapshot,
+)
 
 # ── import 路徑修正（原路徑 core.user_context 為錯誤路徑） ──────────────────────
 from core.ai.user_context import (
@@ -244,6 +252,97 @@ class AiOwnerCommands(commands.Cog):
         for i in range(0, len(text), 1_900):
             await ctx.send(text[i : i + 1_900])
 
+    # ── 資料庫檢視 ─────────────────────
+
+    @commands.group(name="database", aliases=["資料庫"], invoke_without_command=True)
+    @commands.is_owner()
+    async def cmd_database(self, ctx: commands.Context) -> None:
+        """$database — Owner 專用的唯讀資料庫檢視工具"""
+        await ctx.reply(
+            "**資料庫檢視指令**\n"
+            "`$database tables` — 查看資料表與筆數\n"
+            "`$database table <表名> [1~100]` — 匯出資料表預覽\n"
+            "`$database memory <@使用者|ID>` — 匯出指定使用者的 AI 記憶"
+        )
+
+    @cmd_database.command(name="tables", aliases=["表"])
+    @commands.is_owner()
+    async def cmd_database_tables(self, ctx: commands.Context) -> None:
+        """$database tables — 顯示所有允許查詢的資料表與筆數"""
+        overview = await get_database_overview()
+        lines = [
+            f"`{item['table']}` — {item['label']}：**{item['rows']:,}** 筆"
+            for item in overview
+        ]
+        await ctx.reply("**SQLite 資料表**\n" + ("\n".join(lines) or "目前沒有資料表"))
+
+    @cmd_database.command(name="table", aliases=["查表"])
+    @commands.is_owner()
+    async def cmd_database_table(
+        self,
+        ctx: commands.Context,
+        table: str,
+        limit: int = 20,
+    ) -> None:
+        """$database table <表名> [1~100] — 以 Markdown 匯出最新資料"""
+        try:
+            snapshot = await get_table_snapshot(table, limit)
+        except ValueError as exc:
+            await ctx.reply(str(exc))
+            return
+
+        markdown = render_table_snapshot(snapshot)
+        file = discord.File(
+            io.BytesIO(markdown.encode("utf-8")),
+            filename=f"database_{snapshot['table']}.md",
+        )
+        log_admin_action(
+            actor_id=str(ctx.author.id),
+            command="database.table",
+            target_id=snapshot["table"],
+            detail=f"limit={snapshot['limit']}",
+        )
+        await ctx.reply(
+            f"已匯出 `{snapshot['table']}`："
+            f"顯示 {len(snapshot['rows'])} / {snapshot['total']} 筆。",
+            file=file,
+        )
+
+    @cmd_database.command(name="memory", aliases=["記憶", "user"])
+    @commands.is_owner()
+    async def cmd_database_memory(self, ctx: commands.Context, target: str) -> None:
+        """$database memory <@使用者|ID> — 匯出使用者 AI 記憶"""
+        user_id = target.strip().removeprefix("<@").removesuffix(">").lstrip("!")
+        if not user_id.isdecimal():
+            await ctx.reply("請提供 Discord 使用者 mention 或數字 ID")
+            return
+
+        snapshot = await get_user_memory_snapshot(user_id)
+        cached_user = self.bot.get_user(int(user_id))
+        display_name = cached_user.display_name if cached_user else snapshot.get("username", "")
+        markdown = render_user_memory(snapshot, display_name)
+        file = discord.File(
+            io.BytesIO(markdown.encode("utf-8")),
+            filename=f"user_memory_{user_id}.md",
+        )
+        log_admin_action(
+            actor_id=str(ctx.author.id),
+            command="database.memory.export",
+            target_id=user_id,
+            detail=(
+                f"messages={len(snapshot['messages'])} "
+                f"memories={len(snapshot['memories'])} "
+                f"vectors={len(snapshot['vector_memories'])}"
+            ),
+        )
+        await ctx.reply(
+            f"已匯出 **{display_name or user_id}** 的 AI 記憶，"
+            f"共 {len(snapshot['messages'])} 筆對話、"
+            f"{len(snapshot['memories'])} 筆一般記憶、"
+            f"{len(snapshot['vector_memories'])} 筆向量記憶。",
+            file=file,
+        )
+
     # ── 統一錯誤處理 ──────────────────────
 
     @cmd_tier.error
@@ -253,6 +352,10 @@ class AiOwnerCommands(commands.Cog):
     @cmd_memory.error
     @cmd_remove_memory.error
     @cmd_social.error
+    @cmd_database.error
+    @cmd_database_tables.error
+    @cmd_database_table.error
+    @cmd_database_memory.error
     async def owner_error(
         self,
         ctx:   commands.Context,

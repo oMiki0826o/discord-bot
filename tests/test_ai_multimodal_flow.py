@@ -118,6 +118,18 @@ def test_ranker_accepts_non_string_query_without_crashing():
     assert result[0][0] == "python"
 
 
+def test_ranker_matches_chinese_without_spaces_and_drops_irrelevant_background():
+    result = rank_memories(
+        "流螢喜歡什麼食物",
+        [
+            ("興趣", "流螢喜歡橡木蛋糕捲", 5),
+            ("戰鬥", "格拉默戰士與薩姆機甲", 5),
+        ],
+    )
+
+    assert result == [("興趣", "流螢喜歡橡木蛋糕捲", 5)]
+
+
 # ── Gemini Contents ──────────────────────
 
 def test_build_contents_includes_image_parts_for_gemini():

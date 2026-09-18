@@ -57,6 +57,12 @@ def get_connection() -> sqlite3.Connection:
         _DB,
         detect_types   = sqlite3.PARSE_DECLTYPES,
         check_same_thread = False,
+        timeout=10.0,
     )
     conn.row_factory = sqlite3.Row
+    # 記憶背景工作與前景查詢會同時存取 SQLite。WAL 允許讀寫並行，
+    # busy_timeout 則避免短暫寫入競爭直接變成 database is locked。
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn

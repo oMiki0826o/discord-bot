@@ -21,7 +21,7 @@ Modification():
 - AI listener 僅略過自己發出的訊息，允許其他 Bot／應用透過 mention 呼叫
 - 其他 Bot／應用是否可以呼叫 AI，可由 ai.allow_other_applications 開關控制
 - AI 處理及產生回覆期間只顯示 Discord typing 指示器，
-  不再送出「思考中...」佔位訊息
+  不再送出「思考中...」佔位訊息，也不逐字更新回覆
 - 附件仍分流為 file_parser 解析結果或 Gemini 圖片 Part，單一附件失敗不終止整體流程
 
 職責：
@@ -42,11 +42,14 @@ from discord.ext import commands
 
 from core.ai.attachment_utils import process_attachments
 from core.ai.core import generate
+from core.ai.prompt_logging import redact_prompt, set_prompt_log_client
 from core.ai.request_guard import check_cooldown, cooldown_message, lock_for
-from core.ai.streaming_response import StreamingResponse
+from core.ai.typing import optional_typing
 from core.system.settings import get_bool, get_int, get_str
 
 logger = logging.getLogger("bot.ai.chat")
+
+DISCORD_SAFE_MESSAGE_LIMIT = 1_900
 
 
 # ── Cog ──────────────────────
@@ -55,6 +58,7 @@ class Chat(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        set_prompt_log_client(bot)
 
     # ── 清理 Mention ──────────────────────
 
@@ -83,14 +87,14 @@ class Chat(commands.Cog):
         """
         決策流程：
         1. text 為空 → 回覆（回覆為空）
-        2. text ≤ ai.max_reply_length → 直接回覆文字
-        3. text > ai.max_reply_length → 改傳 .txt 附件
+        2. text ≤ 1900 → 直接回覆文字
+        3. text > 1900 → 改傳 .txt 附件
         """
         if not text or not text.strip():
             await original.reply(get_str("ai.empty_reply_message", "（回覆為空）"))
             return
 
-        if len(text) <= max(1, get_int("ai.max_reply_length", 1500)):
+        if len(text) <= DISCORD_SAFE_MESSAGE_LIMIT:
             await original.reply(text)
             return
 
@@ -110,7 +114,7 @@ class Chat(commands.Cog):
         完整的 AI 請求流程：
         1. 冷卻 & 鎖定檢查
         2. 解析附件（圖片 Part / file_parser 結果）
-        3. 等待 generate() 回傳完整文字，期間持續顯示 typing
+        3. 等待 generate() 回傳完整文字，期間持續顯示 typing，不逐字輸出
         4. 根據長度決定回覆方式
         """
         user_id = message.author.id
@@ -126,25 +130,24 @@ class Chat(commands.Cog):
             await message.reply(cooldown_message())
             return
 
-        async with lock, message.channel.typing():
+        async with lock, optional_typing(message.channel):
             request_started = perf_counter()
             # ── 附件解析（鎖定後才處理，避免並發請求重複下載） ──────────────────────
             files, image_parts = await process_attachments(message.attachments)
             attachment_elapsed = perf_counter() - request_started
-            stream = StreamingResponse(message.reply)
-
             try:
+                reply_reference = await self._get_reply_reference(message)
+                channel_messages = await self._get_channel_context(message)
                 text = await generate(
                     user=message.author,
                     prompt=prompt,
                     channel_id=str(message.channel.id),
                     files=files,
                     image_parts=image_parts,
-                    on_chunk=stream.push,
-                    on_retry=stream.reset,
+                    reply_reference=reply_reference,
+                    channel_messages=channel_messages,
                 )
-                if not await stream.finish(text):
-                    await self.send_response(message, text)
+                await self.send_response(message, text)
                 logger.info(
                     "[timing] user=%s attachments=%.3fs discord_total=%.3fs",
                     user_id, attachment_elapsed, perf_counter() - request_started,
@@ -159,8 +162,115 @@ class Chat(commands.Cog):
                     error_message = template.format(error=type(e).__name__)
                 except (KeyError, ValueError):
                     error_message = f"錯誤：{type(e).__name__}"
-                if not await stream.finish(error_message):
-                    await message.reply(error_message)
+                await message.reply(error_message)
+
+    async def _get_channel_context(self, message: discord.Message) -> list[dict]:
+        """
+        只在 @Bot 當下讀取觸發訊息之前的頻道歷史。
+
+        取回的內容僅用於本次 Context，不透過 memory_manager 寫入
+        長期記憶、Profile 或對話摘要。
+        """
+        if not get_bool("ai.channel_context_enabled", True):
+            return []
+        if getattr(message, "guild", None) is None:
+            return []
+
+        history = getattr(message.channel, "history", None)
+        if history is None:
+            return []
+
+        limit = max(1, min(100, get_int("ai.channel_context_message_limit", 50)))
+        per_message_limit = max(
+            100, get_int("ai.channel_context_message_max_chars", 1_000),
+        )
+        include_other_bots = get_bool("ai.channel_context_include_bots", True)
+        bot_user = getattr(self.bot, "user", None)
+        collected: list[dict] = []
+
+        try:
+            async for item in history(
+                limit=limit,
+                before=message,
+                oldest_first=False,
+            ):
+                is_self = bot_user is not None and item.author.id == bot_user.id
+                if item.author.bot and not is_self and not include_other_bots:
+                    continue
+
+                content = item.content or ""
+                if bot_user is not None:
+                    content = (
+                        content
+                        .replace(f"<@{bot_user.id}>", "")
+                        .replace(f"<@!{bot_user.id}>", "")
+                        .strip()
+                    )
+                if item.attachments:
+                    names = "、".join(a.filename for a in item.attachments[:5])
+                    content = f"{content}\n[附件：{names}]".strip()
+                if not content:
+                    continue
+
+                reference = getattr(item, "reference", None)
+                collected.append({
+                    "message_id": str(item.id),
+                    "author_id": str(item.author.id),
+                    "display_name": str(
+                        getattr(item.author, "display_name", None)
+                        or getattr(item.author, "name", None)
+                        or item.author.id
+                    ),
+                    "role": "assistant" if is_self else (
+                        "bot" if item.author.bot else "user"
+                    ),
+                    "created_at": item.created_at.isoformat()
+                    if getattr(item, "created_at", None) is not None else "",
+                    "reply_to_message_id": str(reference.message_id)
+                    if reference is not None
+                    and getattr(reference, "message_id", None) is not None
+                    else "",
+                    "content": redact_prompt(content[:per_message_limit]),
+                })
+        except (discord.Forbidden, discord.HTTPException, AttributeError, TypeError) as exc:
+            logger.warning(
+                "[channel_context] channel=%s history unavailable: %s",
+                getattr(message.channel, "id", "unknown"), exc,
+            )
+            return []
+
+        collected.reverse()
+        logger.info(
+            "[channel_context] channel=%s fetched=%d limit=%d",
+            getattr(message.channel, "id", "unknown"), len(collected), limit,
+        )
+        return collected
+
+    async def _get_reply_reference(self, message: discord.Message) -> dict | None:
+        """取得 Discord Reply 的作者與內容；無法讀取時安靜略過。"""
+        reference = getattr(message, "reference", None)
+        if reference is None or reference.message_id is None:
+            return None
+
+        resolved = reference.resolved
+        referenced = resolved if isinstance(resolved, discord.Message) else None
+        if referenced is None:
+            try:
+                referenced = await message.channel.fetch_message(reference.message_id)
+            except (discord.HTTPException, discord.Forbidden, discord.NotFound, AttributeError):
+                return None
+
+        author = referenced.author
+        return {
+            "message_id": str(referenced.id),
+            "author_id": str(author.id),
+            "display_name": str(
+                getattr(author, "display_name", None)
+                or getattr(author, "name", None)
+                or author.id
+            ),
+            "content": referenced.content[:4_000],
+        }
 
     # ── 指令訊息判斷 ──────────────────────
 

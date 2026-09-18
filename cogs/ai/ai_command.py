@@ -17,7 +17,7 @@ Modification():
 - allowed_contexts(guilds=True, dms=True, private_channels=True)：
   與 say.py 的既有慣例一致，讓指令同時可在伺服器與各種私訊情境使用。
 - 附件處理與 AI 產生回覆期間會顯示 Discord typing 指示器，
-  並在完成或發生例外時自動停止。
+  並在完成或發生例外時自動停止；回覆完成後一次送出，不逐字更新。
 - 新增 model 選填參數（Discord Choice：flash／gemini／gemma），讓
   使用者可透過下拉選單明確指定本次對話要用的模型，不必再依賴 prompt
   文字內嵌關鍵字（如「用flash」）才能間接觸發覆寫；選項清單直接沿用
@@ -50,11 +50,14 @@ from discord.ext import commands
 from core.ai.agent_router import MODEL_CHOICES
 from core.ai.attachment_utils import process_attachments
 from core.ai.core import generate
+from core.ai.prompt_logging import set_prompt_log_client
 from core.ai.request_guard import check_cooldown, cooldown_message, lock_for
-from core.ai.streaming_response import StreamingResponse
-from core.system.settings import get_int, get_str
+from core.ai.typing import optional_typing
+from core.system.settings import get_str
 
 logger = logging.getLogger("bot.ai.ai_command")
+
+DISCORD_SAFE_MESSAGE_LIMIT = 1_900
 
 # ── /ai 指令可選模型（Discord 下拉選單顯示文字） ──────────────────────
 # key 必須與 agent_router.MODEL_CHOICES 完全一致；下方 assert 於
@@ -78,6 +81,7 @@ class AICommand(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        set_prompt_log_client(bot)
 
     @app_commands.command(name="ai", description="與 AI 對話")
     @app_commands.describe(
@@ -122,16 +126,11 @@ class AICommand(commands.Cog):
         # 頻道內其他人也能看到問答內容。
         await interaction.response.defer(thinking=True)
 
-        async with lock, interaction.channel.typing():
+        async with lock, optional_typing(interaction.channel):
             request_started = perf_counter()
             attachments = [a for a in (file1, file2, file3) if a is not None]
             files, image_parts = await process_attachments(attachments)
             attachment_elapsed = perf_counter() - request_started
-
-            async def send_stream(content: str) -> discord.Message:
-                return await interaction.followup.send(content, wait=True)
-
-            stream = StreamingResponse(send_stream)
 
             try:
                 text = await generate(
@@ -141,11 +140,8 @@ class AICommand(commands.Cog):
                     files          = files,
                     image_parts    = image_parts,
                     model_override = model.value if model is not None else None,
-                    on_chunk       = stream.push,
-                    on_retry       = stream.reset,
                 )
-                if not await stream.finish(text):
-                    await self._send_response(interaction, text)
+                await self._send_response(interaction, text)
                 logger.info(
                     "[timing] user=%s attachments=%.3fs discord_total=%.3fs",
                     user_id, attachment_elapsed, perf_counter() - request_started,
@@ -158,8 +154,7 @@ class AICommand(commands.Cog):
                     error_message = template.format(error=type(e).__name__)
                 except (KeyError, ValueError):
                     error_message = f"錯誤：{type(e).__name__}"
-                if not await stream.finish(error_message):
-                    await interaction.followup.send(error_message)
+                await interaction.followup.send(error_message)
 
     # ── 送出回覆 ──────────────────────
 
@@ -173,14 +168,14 @@ class AICommand(commands.Cog):
         方式改用 interaction.followup（defer 之後就不能再用
         interaction.response）：
         1. text 為空 → 送出「（回覆為空）」提示
-        2. text ≤ ai.max_reply_length → 直接送出文字
-        3. text > ai.max_reply_length → 改傳 .txt 附件
+        2. text ≤ 1900 → 直接送出文字
+        3. text > 1900 → 改傳 .txt 附件
         """
         if not text or not text.strip():
             await interaction.followup.send(get_str("ai.empty_reply_message", "（回覆為空）"))
             return
 
-        if len(text) <= max(1, get_int("ai.max_reply_length", 1500)):
+        if len(text) <= DISCORD_SAFE_MESSAGE_LIMIT:
             await interaction.followup.send(text)
             return
 
